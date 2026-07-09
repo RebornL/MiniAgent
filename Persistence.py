@@ -77,21 +77,20 @@ class PersistenceManager:
     # ── 保存 ──
     def save_session(
         self, session_id: str,
-        messages: list[dict],
-        summary: str,
-        runs: list[dict],
+        messages: list[dict], summary: str,
+        runs: list[dict], active_skills: list[str],
         last_user_input: str = "",
     ) -> None:
-        """一次性保存全部状态"""
         old_meta = self._load_meta(session_id)
         self.store.save(session_id, "messages.json", messages)
         self.store.save(session_id, "traces.json", runs)
         self.store.save(session_id, "meta.json", {
-            "created":       old_meta.get("created") or time.strftime("%Y-%m-%d %H:%M:%S"),
-            "updated":       time.strftime("%Y-%m-%d %H:%M:%S"),
-            "last_message":  last_user_input[:100],
-            "message_count": len(messages),
-            "summary":       summary,
+            "created":        old_meta.get("created") or time.strftime("%Y-%m-%d %H:%M:%S"),
+            "updated":        time.strftime("%Y-%m-%d %H:%M:%S"),
+            "last_message":   last_user_input[:100],
+            "message_count":  len(messages),
+            "summary":        summary,
+            "active_skills":  active_skills,
         })
 
     def save_messages(self, session_id: str, messages: list[dict]) -> None:
@@ -102,8 +101,9 @@ class PersistenceManager:
     def load_session(self, session_id: str) -> dict:
         return {
             "messages": self.store.load(session_id, "messages.json") or [],
-            "summary":  self._load_meta(session_id).get("summary", ""),
-            "runs":     self.store.load(session_id, "traces.json") or [],
+            "summary": self._load_meta(session_id).get("summary", ""),
+            "active_skills": self._load_meta(session_id).get("active_skills", []),
+            "runs": self.store.load(session_id, "traces.json") or [],
         }
 
     def load_messages(self, session_id: str) -> list[dict]:

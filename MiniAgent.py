@@ -6,12 +6,14 @@ import json
 import os
 import time
 import uuid
+from pathlib import Path
 
 from openai import OpenAI
 
 from AgentTrace import Span, AgentTracer
 from Compaction import ContextManager, to_dict
 from Persistence import PersistenceManager, Store
+from SkillManager import SkillManager, Skill
 
 client = OpenAI(
     base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
@@ -39,6 +41,22 @@ def calculate(expression: str) -> str:
         return str(eval(expression))
     except Exception as e:
         return f"计算错误: {e}"
+
+def read_file(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"读取文件失败: {e}"
+
+def write_file(path: str, content: str) -> str:
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return f"✅ 已写入 {path}（{len(content)} 字符）"
+    except Exception as e:
+        return f"写入文件失败: {e}"
 
 # ─── 2. 工具注册表（LLM 通过描述知道有什么工具可用）───
 TOOLS = [
@@ -138,6 +156,14 @@ def run_agent(user_input: str, max_steps: int = 5) -> str:
     return "⚠️ 达到最大步数限制，Agent 未能在限定步数内完成任务"
 
 
+def build_system_prompt(base_prompt: str, skills: SkillManager) -> str:
+    """组装 system prompt = base + 激活 skill 的领域知识"""
+    parts = [base_prompt]
+    skill_prompt = skills.get_active_prompt()
+    if skill_prompt:
+        parts.append(f"\n\n--- 当前激活的技能 ---\n{skill_prompt}")
+    return "\n".join(parts)
+
 def run_agent_with_trace(
     user_input: str,
     *,
@@ -145,6 +171,8 @@ def run_agent_with_trace(
     client: OpenAI,
     ctx: ContextManager,
     pm: PersistenceManager,
+    skills: SkillManager,
+    base_system_prompt: str,
     session_id: str | None = None,
     max_steps: int = 5,
 ) -> str:
@@ -158,6 +186,9 @@ def run_agent_with_trace(
         state = pm.load_session(session_id)
         messages = state["messages"]
         ctx.restore(state["summary"])
+        for name in state.get("active_skills", []):
+            # 加载之前对话的skill
+            skills.load(name)
         print(f"📂 恢复会话 {session_id}，已有 {len(messages)} 条消息")
     else:
         session_id = pm.new_session_id()
@@ -174,6 +205,17 @@ def run_agent_with_trace(
 
     # ── 主循环 ─────────────────────────────────────
     for step in range(max_steps):
+        # ← 新增：每次 LLM 调用前动态拼装 tools
+        active_tools = skills.get_active_tools()
+        active_tool_map = skills.get_active_tool_map()
+
+        # ← 新增：动态拼装 system prompt
+        system_prompt = build_system_prompt(base_system_prompt, skills)
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = system_prompt
+        else:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+
         print(ctx.stats(messages))
 
         t0 = time.time()
@@ -181,7 +223,7 @@ def run_agent_with_trace(
             response = client.chat.completions.create(
                 model="deepseek-v4-pro",
                 messages=messages,
-                tools=TOOLS,
+                tools=active_tools,
                 tool_choice="auto",
             )
         except Exception as e:
@@ -209,7 +251,7 @@ def run_agent_with_trace(
             # ✅ 新增：最终保存
             pm.save_session(
                 session_id, messages, ctx.summary,
-                tracer.to_dicts(), user_input,
+                tracer.to_dicts(), list(skills._active), user_input,
             )
             print(tracer.summary(run))
             print(f"💾 会话已保存: {session_id}")
@@ -222,7 +264,7 @@ def run_agent_with_trace(
 
             t0 = time.time()
             try:
-                result = TOOL_MAP[name](**args)
+                result = active_tool_map[name](**args)
             except Exception as e:
                 result = f"工具执行错误: {e}"
 
@@ -243,7 +285,7 @@ def run_agent_with_trace(
 
     # 达到最大步数
     run.end_time = time.time()
-    pm.save_session(session_id, messages, ctx.summary, tracer.to_dicts(), user_input)
+    pm.save_session(session_id, messages, ctx.summary, tracer.to_dicts(), list(skills._active), user_input)
     print(tracer.summary(run))
     print(f"💾 会话已保存: {session_id}")
     return "⚠️ 达到最大步数限制"
@@ -277,6 +319,99 @@ if __name__ == "__main__":
     tracer = AgentTracer()
     ctx = ContextManager()
     pm = PersistenceManager()
+    skills = SkillManager()
+
+    skills.register(Skill(
+        name="web-search",
+        description="互联网搜索能力",
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "search_web",
+                "description": "搜索互联网获取信息，输入中文关键词",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "搜索关键词"}},
+                    "required": ["query"],
+                },
+            },
+        }],
+        tool_map={"search_web": search_web},
+        system_prompt="你拥有搜索能力。遇到不确定的事实性问题，请先搜索再回答，不要猜测。",
+    ))
+
+    skills.register(Skill(
+        name="calculator",
+        description="数学计算能力",
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "calculate",
+                "description": "执行数学计算，输入数学表达式",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"expression": {"type": "string", "description": "数学表达式"}},
+                    "required": ["expression"],
+                },
+            },
+        }],
+        tool_map={"calculate": calculate},
+        system_prompt="你拥有计算能力。遇到数学计算请调用 calculate 工具，不要心算。",
+    ))
+
+    # Skill 3: 文件操作
+    skills.register(Skill(
+        name="file-ops",
+        description="文件读写能力",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "读取文件内容",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string", "description": "文件路径"}},
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "写入文件内容",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "文件路径"},
+                            "content": {"type": "string", "description": "文件内容"},
+                        },
+                        "required": ["path", "content"],
+                    },
+                },
+            },
+        ],
+        tool_map={"read_file": read_file, "write_file": write_file},
+        system_prompt="你拥有文件读写能力。操作文件前请确认路径正确。",
+    ))
+
+    base_prompt = (
+        "你是一个有用的助手。"
+        "你可以使用 load_skill 加载需要的技能模块，用 unload_skill 释放不再需要的模块。"
+        "遇到不确定的事实时，请先加载对应技能再操作，不要猜测。"
+    )
+
+    answer = run_agent_with_trace(
+        "北京天气怎么样？顺便帮我算 156*23",
+        tracer=tracer,
+        client=client,
+        ctx=ctx,
+        pm=pm,
+        skills=skills,
+        base_system_prompt=base_prompt,
+    )
+    print(f"\n🎯 最终答案: {answer}")
 
     # 新建会话
     # answer = run_agent_with_trace(
@@ -290,16 +425,16 @@ if __name__ == "__main__":
     # print(f"🎯 最终结果: {answer}")
 
     # 恢复继续
-    answer = run_agent_with_trace(
-        "那上海呢？",
-        tracer=tracer,
-        client=client,
-        ctx=ctx,
-        pm=pm,
-        session_id="20260701_143022_a1b2c3d4",
-    )
-    print(f"\n{'=' * 50}")
-    print(f"🎯 最终结果: {answer}")
+    # answer = run_agent_with_trace(
+    #     "那上海呢？",
+    #     tracer=tracer,
+    #     client=client,
+    #     ctx=ctx,
+    #     pm=pm,
+    #     session_id="20260701_143022_a1b2c3d4",
+    # )
+    # print(f"\n{'=' * 50}")
+    # print(f"🎯 最终结果: {answer}")
 
     # agent_tracer = AgentTracer()
     # result = run_agent_with_trace("1、北京天气怎么样？顺便帮我算一下 156 * 23; 2、上海天气怎么样？顺便帮我算一下 1126 * 523", agent_tracer)
