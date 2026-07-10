@@ -175,6 +175,7 @@ def run_agent_with_trace(
     base_system_prompt: str,
     session_id: str | None = None,
     max_steps: int = 5,
+    model: str = "deepseek-v4-pro",
 ) -> str:
     """
     带 可观测 + 压缩 + 持久化 的 Agent 循环。
@@ -186,6 +187,7 @@ def run_agent_with_trace(
         state = pm.load_session(session_id)
         messages = state["messages"]
         ctx.restore(state["summary"])
+        skills.reset()
         for name in state.get("active_skills", []):
             # 加载之前对话的skill
             skills.load(name)
@@ -221,7 +223,7 @@ def run_agent_with_trace(
         t0 = time.time()
         try:
             response = client.chat.completions.create(
-                model="deepseek-v4-pro",
+                model=model,
                 messages=messages,
                 tools=active_tools,
                 tool_choice="auto",
@@ -313,12 +315,129 @@ def resume_session(
         persistence=PersistenceManager(Store(store_dir)),
     )
 
-# ─── 4. 跑起来 ────────────────────────────────────
-if __name__ == "__main__":
-    # client = OpenAI()
+def chat_loop(
+    client: OpenAI,
+    skills: SkillManager,
+    base_system_prompt: str,
+    model: str = "deepseek-v4-flash",
+    session_id: str | None = None,
+    store_dir: str = "./agent_sessions",
+):
+    """
+    交互式多轮对话。
+
+    用法:
+      >>> chat_loop(client, skills, "你是助手...")
+      You: 北京天气怎么样？
+      Agent: 北京今天晴，25°C
+      You: 那上海呢？
+      Agent: 上海今天小雨，22°C
+      You: /exit
+    """
     tracer = AgentTracer()
     ctx = ContextManager()
-    pm = PersistenceManager()
+    pm = PersistenceManager(Store(store_dir))
+
+    # 如果没有传入 session_id，新建一个
+    if session_id is None:
+        session_id = pm.new_session_id()
+        print(f"🆕 新会话: {session_id}")
+    else:
+        print(f"📂 恢复会话: {session_id}")
+
+    print("输入 /exit 退出，/history 查看历史会话，/switch <id> 切换会话\n")
+
+    while True:
+        try:
+            user_input = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n👋 再见")
+            break
+
+        if not user_input:
+            continue
+
+        # ── /exit ──
+        if user_input == "/exit":
+            print("👋 再见")
+            break
+
+        # ── /help ──
+        elif user_input == "/help":
+            print("""
+      命令:
+        /exit              退出
+        /history           查看所有历史会话
+        /switch <id>       切换到指定会话
+        /new               新建会话（放弃当前）
+        /help              显示此帮助
+      直接输入文字即可对话。
+            """.strip())
+            continue
+
+        # ── /new ──
+        elif user_input == "/new":
+            session_id = pm.new_session_id()
+            tracer = AgentTracer()
+            ctx = ContextManager()
+            skills.reset()
+            print(f"🆕 新会话: {session_id}")
+            continue
+
+        # ── /history ──
+        elif user_input == "/history":
+            sessions = pm.list_sessions()
+            if not sessions:
+                print("📭 暂无历史会话")
+                continue
+            for s in sessions:
+                marker = " ← 当前" if s["id"] == session_id else ""
+                print(f"  {s['id']} | {s['message_count']}条 | {s['updated']} | {s['last_message']}{marker}")
+            continue
+
+        # ── /switch ──
+        elif user_input.startswith("/switch"):
+            parts = user_input.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                print("⚠️ 用法: /switch <session_id>")
+                print("   先用 /history 查看可用会话，再切换")
+                continue
+
+            new_id = parts[1].strip()
+
+            if new_id == session_id:
+                print(f"⚠️ 已经是当前会话: {session_id}")
+                continue
+
+            state = pm.load_session(new_id)
+            if not state["messages"]:
+                print(f"❌ 会话 {new_id} 不存在或为空")
+                continue
+
+            session_id = new_id
+            tracer = AgentTracer()
+            ctx = ContextManager()
+            ctx.restore(state["summary"])
+            skills.reset()
+            print(f"✅ 已切换到 {session_id}（{len(state['messages'])} 条消息）")
+
+        # ── 正常对话 ──
+        else:
+            answer = run_agent_with_trace(
+                user_input,
+                tracer=tracer,
+                client=client,
+                ctx=ctx,
+                pm=pm,
+                skills=skills,
+                base_system_prompt=base_system_prompt,
+                session_id=session_id,
+                model=model,
+            )
+            print(f"Agent: {answer}\n")
+
+# ─── 4. 跑起来 ────────────────────────────────────
+if __name__ == "__main__":
     skills = SkillManager()
 
     skills.register(Skill(
@@ -402,16 +521,20 @@ if __name__ == "__main__":
         "遇到不确定的事实时，请先加载对应技能再操作，不要猜测。"
     )
 
-    answer = run_agent_with_trace(
-        "北京天气怎么样？顺便帮我算 156*23",
-        tracer=tracer,
-        client=client,
-        ctx=ctx,
-        pm=pm,
-        skills=skills,
-        base_system_prompt=base_prompt,
-    )
-    print(f"\n🎯 最终答案: {answer}")
+    chat_loop(client, skills, base_prompt, "deepseek-v4-pro")
+    # tracer = AgentTracer()
+    # ctx = ContextManager()
+    # pm = PersistenceManager()
+    # answer = run_agent_with_trace(
+    #     "北京天气怎么样？顺便帮我算 156*23",
+    #     tracer=tracer,
+    #     client=client,
+    #     ctx=ctx,
+    #     pm=pm,
+    #     skills=skills,
+    #     base_system_prompt=base_prompt,
+    # )
+    # print(f"\n🎯 最终答案: {answer}")
 
     # 新建会话
     # answer = run_agent_with_trace(

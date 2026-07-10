@@ -113,3 +113,7 @@ class SkillManager:
     def stats(self) -> str:
         loaded = ", ".join(self._active) if self._active else "无"
         return f"Skills: {len(self._active)}/{len(self._skills)} 已加载 [{loaded}]"
+
+    def reset(self) -> None:
+        """清空所有已激活的 skill（切换会话时用）"""
+        self._active.clear()
