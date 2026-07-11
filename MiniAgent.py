@@ -17,10 +17,25 @@ from Persistence import PersistenceManager, Store
 from RetryFunc import with_retry
 from SkillManager import SkillManager, Skill
 
+
+
+def _load_config() -> dict:
+    """从 config.json 加载配置，文件不存在则报错提示"""
+    config_path = Path(__file__).parent / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"配置文件缺失: {config_path}\n"
+            "请参考 README.md 创建 config.json，包含 base_url 和 api_key"
+        )
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+_config = _load_config()
 client = OpenAI(
-    base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
-    api_key="ark-83528937-561f-455e-a54f-2c96067a1830-7abcc",
-)  # 默认读 OPENAI_API_KEY 环境变量
+    base_url=_config["base_url"],
+    api_key=_config["api_key"],
+)
 
 # ─── 1. 定义工具 ─────────────────────────────────
 # 工具就是一个函数 + 一段描述（给 LLM 看的）

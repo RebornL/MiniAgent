@@ -2,3 +2,4 @@ agent_sessions
 /.idea/
 __pycache__
 /todo.md
+/config.json
