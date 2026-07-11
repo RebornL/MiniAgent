@@ -11,8 +11,10 @@ from pathlib import Path
 from openai import OpenAI
 
 from AgentTrace import Span, AgentTracer
+from CallFunc import call_with_timeout
 from Compaction import ContextManager, to_dict
 from Persistence import PersistenceManager, Store
+from RetryFunc import with_retry
 from SkillManager import SkillManager, Skill
 
 client = OpenAI(
@@ -304,7 +306,10 @@ def run_agent_with_trace(
         # 修改为流式输出
         t0 = time.time()
         try:
-            content, tool_calls = stream_llm_call(client, model, messages, active_tools)
+            # 补充重试机制
+            def _call():
+                return stream_llm_call(client, model, messages, active_tools)
+            content, tool_calls = with_retry(_call, label="LLM")
         except Exception as e:
             llm_err = Span(
                 span_id=f"llm_{os.urandom(4).hex()}",
@@ -338,6 +343,8 @@ def run_agent_with_trace(
 
         # 无 tool_calls → 纯文本答案
         if tool_calls is None:
+            # 保存每一轮问答的结论，避免重复回答
+            messages.append({"role": "assistant", "content": content})
             run.end_time = time.time()
             pm.save_session(
                 session_id, messages, ctx.summary,
@@ -361,10 +368,16 @@ def run_agent_with_trace(
             args = json.loads(tc["function"]["arguments"])
 
             t0 = time.time()
-            try:
-                result = active_tool_map[name](**args)  # ← 注意这里用 active_tool_map
-            except Exception as e:
-                result = f"工具执行错误: {e}"
+            # try:
+            #     result = active_tool_map[name](**args)  # ← 注意这里用 active_tool_map
+            # except Exception as e:
+            #     result = f"工具执行错误: {e}"
+            # 包一层超时
+            result = call_with_timeout(
+                active_tool_map[name],
+                kwargs=args,
+                timeout=30,  # 可配置
+            )
 
             tool_span = tracer.log_tool_call(name, args, str(result), time.time() - t0)
             run.children.append(tool_span)
