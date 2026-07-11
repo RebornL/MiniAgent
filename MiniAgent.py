@@ -164,6 +164,88 @@ def build_system_prompt(base_prompt: str, skills: SkillManager) -> str:
         parts.append(f"\n\n--- 当前激活的技能 ---\n{skill_prompt}")
     return "\n".join(parts)
 
+# ═══════════════════════════════════════════════════════════════
+# 辅助：流式 LLM 调用
+# ═══════════════════════════════════════════════════════════════
+def stream_llm_call(
+    client: OpenAI,
+    model: str,
+    messages: list[dict],
+    tools: list[dict],
+) -> tuple[str | None, list[dict] | None]:
+    """流式调用 LLM，边收边打印，tool_call 实时展示"""
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+        stream=True,
+    )
+
+    content_chunks: list[str] = []
+    tool_call_chunks: dict[int, dict] = {}  # index → {id, name, arguments}
+    shown_tool_names: set[int] = set()       # 已打印过的 tool 名
+
+    print("🧠 ", end="", flush=True)
+
+    for chunk in response:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta is None:
+            continue
+
+        # ── 文本内容 ──
+        if delta.content:
+            print(delta.content, end="", flush=True)
+            content_chunks.append(delta.content)
+
+        # ── tool_calls：实时显示 ──
+        if delta.tool_calls:
+            for tc_delta in delta.tool_calls:
+                idx = tc_delta.index
+                if idx not in tool_call_chunks:
+                    tool_call_chunks[idx] = {
+                        "id": tc_delta.id or "",
+                        "name": "",
+                        "arguments": "",
+                    }
+                if tc_delta.id:
+                    tool_call_chunks[idx]["id"] = tc_delta.id
+                if tc_delta.function.name:
+                    tool_call_chunks[idx]["name"] = tc_delta.function.name
+                    # ✅ 新增：一旦拿到 name 就立刻打印
+                    if idx not in shown_tool_names:
+                        print(f"\n  🔧 调用 {tc_delta.function.name}", end="", flush=True)
+                        shown_tool_names.add(idx)
+                if tc_delta.function.arguments:
+                    tool_call_chunks[idx]["arguments"] += tc_delta.function.arguments
+
+    # 如果前面没打印过 content 且没 tool_call，补换行
+    if not content_chunks and not tool_call_chunks:
+        print()
+
+    # ── 组装结果 ──
+    if tool_call_chunks:
+        tc_list = []
+        for idx in sorted(tool_call_chunks.keys()):
+            tc = tool_call_chunks[idx]
+            tc_list.append({
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    "arguments": tc["arguments"],
+                },
+            })
+            # 打印参数（紧跟 name 后面）
+            args_preview = tc["arguments"][:60] + ("..." if len(tc["arguments"]) > 60 else "")
+            if args_preview:
+                print(f"({args_preview})")
+        return None, tc_list
+    else:
+        print()  # 纯文本结束换行
+        return "".join(content_chunks), None
+
 def run_agent_with_trace(
     user_input: str,
     *,
@@ -219,65 +301,140 @@ def run_agent_with_trace(
             messages.insert(0, {"role": "system", "content": system_prompt})
 
         print(ctx.stats(messages))
-
+        # 修改为流式输出
         t0 = time.time()
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=active_tools,
-                tool_choice="auto",
-            )
+            content, tool_calls = stream_llm_call(client, model, messages, active_tools)
         except Exception as e:
             llm_err = Span(
                 span_id=f"llm_{os.urandom(4).hex()}",
-                type="llm_call",
-                start_time=t0,
-                end_time=time.time(),
-                error=str(e),
+                type="llm_call", start_time=t0, end_time=time.time(), error=str(e),
             )
             run.children.append(llm_err)
             raise
 
-        llm_span = tracer.log_llm_call(messages, response, time.time() - t0)
+        # 记录 trace（用简化版，因为流式没有完整 response 对象）
+        # 手动构造 Span 时，把 tool_calls 拍平
+        flat_tool_calls = [
+            {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}
+            for tc in (tool_calls or [])
+        ]
+        input_tokens = ctx.count_tokens(messages)
+        output_text = content or ""
+        if tool_calls:
+            output_text += json.dumps(tool_calls, ensure_ascii=False)
+        output_tokens = len(ctx.encoder.encode(output_text))
+        estimated_tokens = input_tokens + output_tokens
+        llm_span = Span(
+            span_id=f"llm_{os.urandom(4).hex()}",
+            type="llm_call",
+            start_time=t0,
+            end_time=time.time(),
+            input={"message_count": len(messages)},
+            output={"content": content, "tool_calls": flat_tool_calls},  # ← 拍平后存
+            tokens_used=estimated_tokens,
+        )
         run.children.append(llm_span)
 
-        msg = response.choices[0].message
-
-        # ✅ 新增：统一转 dict 再 append
-        messages.append(to_dict(msg))
-
-        # 无需工具 → 输出答案
-        if not msg.tool_calls:
+        # 无 tool_calls → 纯文本答案
+        if tool_calls is None:
             run.end_time = time.time()
-            # ✅ 新增：最终保存
             pm.save_session(
                 session_id, messages, ctx.summary,
                 tracer.to_dicts(), list(skills._active), user_input,
             )
             print(tracer.summary(run))
             print(f"💾 会话已保存: {session_id}")
-            return msg.content or ""
+            return content or ""
 
-        # 执行工具
-        for tool_call in msg.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
+        # 有 tool_calls → 和之前一样，但不再 append assistant 消息（stream 里没有标准 msg 对象）
+        # 手动构造 assistant 消息
+        assistant_msg = {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": tool_calls,
+        }
+        messages.append(assistant_msg)
+
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            args = json.loads(tc["function"]["arguments"])
 
             t0 = time.time()
             try:
-                result = active_tool_map[name](**args)
+                result = active_tool_map[name](**args)  # ← 注意这里用 active_tool_map
             except Exception as e:
                 result = f"工具执行错误: {e}"
 
-            tool_span = tracer.log_tool_call(name, args, result, time.time() - t0)
+            tool_span = tracer.log_tool_call(name, args, str(result), time.time() - t0)
             run.children.append(tool_span)
+
+            print(f"  🔧 {name}({args}) → {str(result)[:80]}")
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": result,
+                "tool_call_id": tc["id"],
+                "content": str(result),
             })
+
+        # t0 = time.time()
+        # try:
+        #     response = client.chat.completions.create(
+        #         model=model,
+        #         messages=messages,
+        #         tools=active_tools,
+        #         tool_choice="auto",
+        #     )
+        # except Exception as e:
+        #     llm_err = Span(
+        #         span_id=f"llm_{os.urandom(4).hex()}",
+        #         type="llm_call",
+        #         start_time=t0,
+        #         end_time=time.time(),
+        #         error=str(e),
+        #     )
+        #     run.children.append(llm_err)
+        #     raise
+        #
+        # llm_span = tracer.log_llm_call(messages, response, time.time() - t0)
+        # run.children.append(llm_span)
+        #
+        # msg = response.choices[0].message
+        #
+        # # ✅ 新增：统一转 dict 再 append
+        # messages.append(to_dict(msg))
+        #
+        # # 无需工具 → 输出答案
+        # if not msg.tool_calls:
+        #     run.end_time = time.time()
+        #     # ✅ 新增：最终保存
+        #     pm.save_session(
+        #         session_id, messages, ctx.summary,
+        #         tracer.to_dicts(), list(skills._active), user_input,
+        #     )
+        #     print(tracer.summary(run))
+        #     print(f"💾 会话已保存: {session_id}")
+        #     return msg.content or ""
+        #
+        # # 执行工具
+        # for tool_call in msg.tool_calls:
+        #     name = tool_call.function.name
+        #     args = json.loads(tool_call.function.arguments)
+        #
+        #     t0 = time.time()
+        #     try:
+        #         result = active_tool_map[name](**args)
+        #     except Exception as e:
+        #         result = f"工具执行错误: {e}"
+        #
+        #     tool_span = tracer.log_tool_call(name, args, result, time.time() - t0)
+        #     run.children.append(tool_span)
+        #
+        #     messages.append({
+        #         "role": "tool",
+        #         "tool_call_id": tool_call.id,
+        #         "content": result,
+        #     })
 
         # ✅ 新增：压缩检查
         messages = ctx.maybe_compact(messages, client)
