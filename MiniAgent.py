@@ -16,7 +16,7 @@ from Compaction import ContextManager, to_dict
 from Persistence import PersistenceManager, Store
 from RetryFunc import with_retry
 from SkillManager import SkillManager, Skill
-
+from Structure import make_final_output_tool, sanitize_output, sanitize_string
 
 
 def _load_config() -> dict:
@@ -46,6 +46,8 @@ def search_web(query: str) -> str:
         "北京天气": "北京今天晴，25°C，微风",
         "上海天气": "上海今天小雨，22°C",
     }
+    if "北京天气" in query:
+        return fake_db.get("北京天气")
     return fake_db.get(query, f"未找到'{query}'的相关结果")
 
 def calculate(expression: str) -> str:
@@ -132,7 +134,7 @@ def run_agent(user_input: str, max_steps: int = 5) -> str:
 
         # 调用 LLM，告诉它有哪些工具可用
         response = client.chat.completions.create(
-            model="deepseek-v4-pro",
+            model="deepseek-v4-flash",
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",  # LLM 自己决定要不要调工具
@@ -263,6 +265,42 @@ def stream_llm_call(
         print()  # 纯文本结束换行
         return "".join(content_chunks), None
 
+# 文件顶部，其他常量旁边
+OUTPUT_TOOL_NAMES = {"final_output"}
+
+
+def make_final_output_tool() -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "final_output",
+            "description": (
+                "以结构化格式输出最终答案。调用此工具表示回答完成。"
+                "result 字段放结构化数据，summary 字段放给用户看的总结。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "result": {
+                        "type": "object",
+                        "description": "最终答案的 JSON 结构化数据",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "给用户看的一句话总结",
+                    },
+                },
+                "required": ["result"],
+            },
+        },
+    }
+
+def final_output_handler(result: dict, summary: str = "") -> str:
+    sanitize_output(result)       # 递归检测字符串值
+    if summary:
+        sanitize_string(summary)  # 检测 summary
+    return json.dumps({"result": result, "summary": summary}, ensure_ascii=False)
+
 def run_agent_with_trace(
     user_input: str,
     *,
@@ -274,7 +312,7 @@ def run_agent_with_trace(
     base_system_prompt: str,
     session_id: str | None = None,
     max_steps: int = 5,
-    model: str = "deepseek-v4-pro",
+    model: str = "deepseek-v4-flash",
 ) -> str:
     """
     带 可观测 + 压缩 + 持久化 的 Agent 循环。
@@ -356,7 +394,7 @@ def run_agent_with_trace(
         )
         run.children.append(llm_span)
 
-        # 无 tool_calls → 纯文本答案
+        # 结构化输出整理
         if tool_calls is None:
             # 保存每一轮问答的结论，避免重复回答
             messages.append({"role": "assistant", "content": content})
@@ -393,6 +431,18 @@ def run_agent_with_trace(
                 kwargs=args,
                 timeout=30,  # 可配置
             )
+
+            # ✅ 新增：final_output 是最终答案，直接返回（不再继续循环）
+            if name in OUTPUT_TOOL_NAMES:
+                messages.append({"role": "assistant", "content": result})
+                run.end_time = time.time()
+                pm.save_session(
+                    session_id, messages, ctx.summary,
+                    tracer.to_dicts(), list(skills._active), user_input,
+                )
+                print(tracer.summary(run))
+                print(f"💾 会话已保存: {session_id}")
+                return result
 
             tool_span = tracer.log_tool_call(name, args, str(result), time.time() - t0)
             run.children.append(tool_span)
@@ -700,13 +750,51 @@ if __name__ == "__main__":
         system_prompt="你拥有文件读写能力。操作文件前请确认路径正确。",
     ))
 
+    # 原来注册 skill 是手写 tool 定义
+    # 现在用工厂函数
+    # weather_schema = {
+    #     "type": "object",
+    #     "properties": {
+    #         "city": {"type": "string", "description": "城市名"},
+    #         "condition": {"type": "string", "description": "天气状况"},
+    #         "temperature": {"type": "number", "description": "温度（℃）"},
+    #     },
+    #     "required": ["city", "condition", "temperature"],
+    # }
+    #
+    # weather_tool, weather_handler = make_final_output_tool(
+    #     name="output_weather",
+    #     description="输出天气查询的最终结果。调用此工具表示回答完成。",
+    #     output_schema=weather_schema,
+    # )
+    #
+    # skills.register(Skill(
+    #     name="weather-output",
+    #     description="天气结果结构化输出",
+    #     tools=[weather_tool],
+    #     tool_map={"output_weather": weather_handler},
+    #     system_prompt="查询天气后，必须调用 output_weather 输出结构化结果，不要直接返回文本。",
+    # ))
+
+    skills.register(Skill(
+        name="structured-output",
+        description="结构化输出能力",
+        tools=[make_final_output_tool()],
+        tool_map={"final_output": final_output_handler},
+        system_prompt=(
+            "回答问题时，请调用 final_output 以结构化格式输出最终结果。"
+            "result 字段放 JSON 结构化数据，summary 字段放给用户看的自然语言总结。"
+            "调用 final_output 后不要再返回其他文本。"
+        ),
+    ))
+
     base_prompt = (
         "你是一个有用的助手。"
-        "你可以使用 load_skill 加载需要的技能模块，用 unload_skill 释放不再需要的模块。"
+        "你可以使用 load_skill 加载需要的技能模块，用 unload_skill 释放不再需要的模块。每次回答前先加载 structured-output"
         "遇到不确定的事实时，请先加载对应技能再操作，不要猜测。"
     )
 
-    chat_loop(client, skills, base_prompt, "deepseek-v4-pro")
+    chat_loop(client, skills, base_prompt, "deepseek-v4-flash")
     # tracer = AgentTracer()
     # ctx = ContextManager()
     # pm = PersistenceManager()

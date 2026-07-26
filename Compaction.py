@@ -26,7 +26,7 @@ class CompactionConfig:
     max_tokens: int = 2000        # 超过此阈值触发压缩
     target_tokens: int = 500     # 压缩后目标 token 数
     keep_last_n: int = 5          # 最近 N 条消息永不压缩
-    summary_model: str = "deepseek-v4-pro"  # 用便宜模型做摘要
+    summary_model: str = "deepseek-v4-flash"  # 用便宜模型做摘要
 
 
 # ═══════════════════════════════════════════════════════════
