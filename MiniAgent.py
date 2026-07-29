@@ -2,6 +2,7 @@
 一个最精简的 Agent 核心实现
 依赖: pip install openai
 """
+import concurrent.futures
 import json
 import os
 import time
@@ -416,25 +417,111 @@ def run_agent_with_trace(
         }
         messages.append(assistant_msg)
 
-        for tc in tool_calls:
-            name = tc["function"]["name"]
-            args = json.loads(tc["function"]["arguments"])
+        # 串行执行工具调用
+        # for tc in tool_calls:
+        #     name = tc["function"]["name"]
+        #     args = json.loads(tc["function"]["arguments"])
+        #
+        #     t0 = time.time()
+        #     # try:
+        #     #     result = active_tool_map[name](**args)  # ← 注意这里用 active_tool_map
+        #     # except Exception as e:
+        #     #     result = f"工具执行错误: {e}"
+        #     # 包一层超时
+        #     result = call_with_timeout(
+        #         active_tool_map[name],
+        #         kwargs=args,
+        #         timeout=30,  # 可配置
+        #     )
+        #
+        #     # ✅ 新增：final_output 是最终答案，直接返回（不再继续循环）
+        #     if name in OUTPUT_TOOL_NAMES:
+        #         messages.append({"role": "assistant", "content": result})
+        #         run.end_time = time.time()
+        #         pm.save_session(
+        #             session_id, messages, ctx.summary,
+        #             tracer.to_dicts(), list(skills._active), user_input,
+        #         )
+        #         print(tracer.summary(run))
+        #         print(f"💾 会话已保存: {session_id}")
+        #         return result
+        #
+        #     tool_span = tracer.log_tool_call(name, args, str(result), time.time() - t0)
+        #     run.children.append(tool_span)
+        #
+        #     print(f"  🔧 {name}({args}) → {str(result)[:80]}")
+        #
+        #     messages.append({
+        #         "role": "tool",
+        #         "tool_call_id": tc["id"],
+        #         "content": str(result),
+        #     })
+        # ── 改为并行执行 ──
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_calls)) as executor:
 
-            t0 = time.time()
-            # try:
-            #     result = active_tool_map[name](**args)  # ← 注意这里用 active_tool_map
-            # except Exception as e:
-            #     result = f"工具执行错误: {e}"
-            # 包一层超时
-            result = call_with_timeout(
-                active_tool_map[name],
-                kwargs=args,
-                timeout=30,  # 可配置
-            )
+            # 提交所有工具到线程池
+            future_map: dict[concurrent.futures.Future, dict] = {}
+            for tc in tool_calls:
+                name = tc["function"]["name"]
+                args = json.loads(tc["function"]["arguments"])
 
-            # ✅ 新增：final_output 是最终答案，直接返回（不再继续循环）
-            if name in OUTPUT_TOOL_NAMES:
-                messages.append({"role": "assistant", "content": result})
+                t0 = time.time()
+                future = executor.submit(
+                    call_with_timeout,
+                    active_tool_map[name],
+                    kwargs=args,
+                    timeout=30,
+                )
+                future_map[future] = {
+                    "name": name,
+                    "args": args,
+                    "start_time": t0,
+                    "tc": tc,
+                }
+
+            # 收集结果（按完成顺序或原始顺序）
+            tool_result_spans = []
+            final_output_found = None
+
+            for future in concurrent.futures.as_completed(future_map):
+                meta = future_map[future]
+                name = meta["name"]
+                args = meta["args"]
+                t0 = meta["start_time"]
+                tc = meta["tc"]
+
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = f"工具执行错误: {e}"
+
+                # 检查是否是 final_output（终止信号）
+                if name in OUTPUT_TOOL_NAMES:
+                    final_output_found = {
+                        "name": name,
+                        "args": args,
+                        "result": result,
+                        "tc": tc,
+                        "duration": time.time() - t0,
+                    }
+                    # 记录 span 但不返回，等其他工具结果也录完再统一返回
+                    span = tracer.log_tool_call(name, args, result, time.time() - t0)
+                    run.children.append(span)
+                    continue
+
+                # 普通工具：记录 span 和消息
+                span = tracer.log_tool_call(name, args, result, time.time() - t0)
+                run.children.append(span)
+                tool_result_spans.append((tc["id"], name, result))
+
+            # ── 处理 final_output ──
+            if final_output_found:
+                fo = final_output_found
+                messages.append({
+                    "role": "assistant",
+                    "content": fo["result"],
+                    "tool_calls": [{"id": fo["tc"]["id"], "type": "function", "function": fo["tc"]["function"]}],
+                })
                 run.end_time = time.time()
                 pm.save_session(
                     session_id, messages, ctx.summary,
@@ -442,18 +529,16 @@ def run_agent_with_trace(
                 )
                 print(tracer.summary(run))
                 print(f"💾 会话已保存: {session_id}")
-                return result
+                return fo["result"]
 
-            tool_span = tracer.log_tool_call(name, args, str(result), time.time() - t0)
-            run.children.append(tool_span)
-
-            print(f"  🔧 {name}({args}) → {str(result)[:80]}")
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": str(result),
-            })
+            # ── 所有工具结果追加到 messages ──
+            for tc_id, name, result in tool_result_spans:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result,
+                })
+                print(f"  🔧 {name} → {str(result)[:80]}")
 
         # t0 = time.time()
         # try:
