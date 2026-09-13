@@ -60,6 +60,20 @@ tools/pre-execute (allow | deny | ask)   权限 / 审批
 1. **超时报 `error` 而非 `ok`**：legacy 的 `CallFunc.call_with_timeout` 把超时也返回成字符串，管道只好把它当成功。现在 `ToolTimeoutPlugin` 抛 `ToolTimeout`，权威结果明确是 `error`，下游可按 `status` 区分「超时」与「成功」。
 2. **`AgentTrace.log_llm_call` 改收纯数据**：原签名吃 OpenAI SDK 的响应对象，逼得日志消费者伪造一个假响应。现在只收已归一化的 `messages` / `content` / `tool_calls`，SDK 形状的耦合留在 provider 一层。
 
+### 超时的边界（已知限制）
+
+超时**只能「停止等待」，不能「取消执行」**。工具体跑在线程里，而 Python 杀不掉线程，所以一次超时意味着：
+
+- 立刻返回结构化 `error`（`工具 <name> 执行超时（<N>ms 未返回）`），不再等它；
+- 丢弃它的返回值；
+- **但不会停止它**——被放弃的工具体仍会跑到底，它已产生的副作用（例如慢写文件留下的半成品）**不会回滚**。
+
+一个实现细节值得记住：工具体跑在 **daemon 线程**里（`threading.Event.wait(timeout)` 限时），而不是 `ThreadPoolExecutor`。非 daemon 的 worker 会在解释器退出时被 `_python_exit` join，于是一个卡死的工具**能把整个进程挂到它跑完**。legacy 的 `CallFunc.call_with_timeout` 正是如此——`with ThreadPoolExecutor(...)` 退出即 `shutdown(wait=True)`，那句「已取消执行」其实是在**等到底之后**才返回的。`test_timeout_does_not_block_process_exit` 用子进程守住这条：修复前该测试会挂满超时。
+
+真正的取消与副作用隔离需要**进程级边界或沙箱**，属规格的 Out of Scope，不在本骨架范围。
+
+同理，`ToolRuntime` 只保证「批内每个 `tool_call` 都落一条配对结果」（否则下一轮上行会被兼容接口以 tool_calls 未配对拒绝），**不保证**被放弃的工具体停止运行。
+
 ### 一处未装
 
 `build_harness()` **不装 `PermissionPlugin`**——legacy 没有审批概念，装了会改变行为。审批能力本身在 `miniharness.py` 里，需要时按 §5 自行装配。
