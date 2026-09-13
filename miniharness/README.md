@@ -19,6 +19,8 @@
 | `miniharness.llm.contract` | LLM 能力的 **Definition（契约）** | `LLM.complete(messages) -> {text, tool_calls?}` | `core` |
 | `miniharness.process` | 中间包：受管范围 seam 角色包的**归属层** | 说明这层 seam：契约在骨架、平台后端在 `providers.process`；不放实现 | 无 |
 | `miniharness.process.contract` | 受管范围 seam 的 **Definition（契约）** | `ManagedRange`（`poll` / `wait_for_exit` / `terminate` / `release`）与 `ProcessSeam.spawn`：以整棵进程树为单位，终止幂等 | `core` |
+| `miniharness.sandbox` | 中间包：沙箱 seam 角色包的**归属层** | 说明这层 seam：契约在骨架、后端在 `providers.sandbox`；不放实现 | 无 |
+| `miniharness.sandbox.contract` | 沙箱 seam 的 **Definition（契约）** | `SandboxSeam.wrap(调用意图, 策略) -> 可执行的 argv + 完整性要求`；不可用即 `SandboxUnavailableError`（fail-closed）；**没有任何终止动词** | `core` |
 | `miniharness.loop` | 三个契约的 **Consumer（消费方）** | `Loop`：取输入 → `agent/pre-step` → llm seam → tools 管线 → 落日志；在每步开始前 / 模型请求前 / 顶层工具派发前派发 `agent/checkpoint`（`CHECKPOINT_*`，订阅者抛错即 fail-closed）；**零策略** | `core`、`session`、`tools.runtime`、`llm.contract` |
 
 **为什么 `tools.contract` 与 `tools.runtime` 是两个包**：契约低频、流水线可变。按变化速率拆包，
@@ -30,6 +32,11 @@
 契约留在本族、平台后端放 `providers/`（§3：骨架 seam 的后端在 `providers/`）：消费方一律
 经 `ctx.get("process")` 拿契约，装配由 `app/` 负责，所以依赖方向仍然是
 `capabilities → miniharness`。
+
+**为什么沙箱与受管范围是两个 seam、不能合成一个**：它们回答两个不同的问题——沙箱回答
+「拿什么 argv、在什么环境下跑」（隔离），受管范围回答「这棵进程树怎么等、怎么终止」（生命周期）。
+变化速率也不同：隔离手段随平台与策略变，终止机制只随平台变。所以沙箱契约里**没有**任何
+终止动词，受管范围契约里**没有**任何隔离策略；`run_command` 依次经过两者，各自只做自己的事。
 
 ## 本族的测试（与实现同层、独立文件）
 

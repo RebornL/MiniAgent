@@ -44,9 +44,9 @@ flowchart TB
 
 | 族 | 内容 | 包地图 |
 | --- | --- | --- |
-| `miniharness/` | 骨架：`core`（Context/Plugin）、`session`（事件日志 + 投影）、`tools/{contract,runtime}`、`llm/contract`、`process/contract`、`loop`（零策略） | [`miniharness/README.md`](../miniharness/README.md) |
-| `capabilities/` | 能力族：每个能力按 `definition`（契约）/ `provider`（实现）/ `consumer`（消费方）拆包——压缩 / 持久化 / 重试 / 超时 / 校验 / 追踪 / 技能 / 审批 / 终结 | [`capabilities/README.md`](../capabilities/README.md) |
-| `providers/` | 后端族：`deepseek`（真实）、`mock`（离线）、`process`（受管范围的平台后端） | [`providers/README.md`](../providers/README.md) |
+| `miniharness/` | 骨架：`core`（Context/Plugin）、`session`（事件日志 + 投影）、`tools/{contract,runtime}`、`llm/contract`、`process/contract`、`sandbox/contract`、`loop`（零策略） | [`miniharness/README.md`](../miniharness/README.md) |
+| `capabilities/` | 能力族：每个能力按 `definition`（契约）/ `provider`（实现）/ `consumer`（消费方）拆包——压缩 / 持久化 / 重试 / 超时 / 校验 / 追踪 / 技能 / 审批 / 沙箱 / 命令执行 / 终结 | [`capabilities/README.md`](../capabilities/README.md) |
+| `providers/` | 后端族：`deepseek`（真实）、`mock`（离线）、`process`（受管范围的平台后端）、`sandbox`（沙箱后端） | [`providers/README.md`](../providers/README.md) |
 | `app/` | 装配族：`config` / `tools` / `assembly`（`build_harness`）/ `cli`（`chat_loop`）/ `__main__` | [`app/README.md`](../app/README.md) |
 | `tests/` | 测试族：跨包集成集中一处；包内测试与实现同层 | [`tests/README.md`](../tests/README.md) |
 
@@ -89,9 +89,41 @@ Loop 一行都不用改）。
 
 一个实现细节值得记住：工具体跑在 **daemon 线程**里（`threading.Event.wait(timeout)` 限时），而不是 `ThreadPoolExecutor`。非 daemon 的 worker 会在解释器退出时被 `_python_exit` join，于是一个卡死的工具**能把整个进程挂到它跑完**。legacy 的 `CallFunc.call_with_timeout` 正是如此——`with ThreadPoolExecutor(...)` 退出即 `shutdown(wait=True)`，那句「已取消执行」其实是在**等到底之后**才返回的。`test_timeout_does_not_block_process_exit` 用子进程守住这条：修复前该测试会挂满超时。
 
-真正的取消与副作用隔离需要**进程级边界或沙箱**，属规格的 Out of Scope，不在本骨架范围。
+真正的取消与副作用隔离需要**进程级边界**：进程级终止已经落地——受管范围 seam 的 `terminate`
+会终止整棵进程树（见下面的「沙箱」与 `providers.process`）；但**文件系统与网络级隔离仍未
+实现**：`EnvSandbox` 不隔离文件系统，`deny_network` 只拒绝、不强制。
 
 同理，`ToolRuntime` 只保证「批内每个 `tool_call` 都落一条配对结果」（否则下一轮上行会被兼容接口以 tool_calls 未配对拒绝），**不保证**被放弃的工具体停止运行。
+
+### 沙箱：只包装 argv，不可用即 fail-closed
+
+`run_command` 起进程之前先过**沙箱 seam**（`miniharness.sandbox.contract` / `providers.sandbox`）：
+
+```mermaid
+flowchart LR
+    I["调用意图<br/>argv + cwd"] --> S["沙箱 seam<br/>wrap(意图, 策略)"]
+    P["策略<br/>env_allowlist / deny_network"] --> S
+    S -->|"可执行的 argv + 完整性要求"| R["受管范围 seam<br/>spawn → 等退出"]
+    S -.->|"不可用 / 强制不了策略"| F["SandboxUnavailableError<br/>→ 结构化 failed，命令没跑"]
+```
+
+- 沙箱**只包装 argv**：它不认识终止、也不起进程；起进程、等退出、终止整棵树都是受管范围的事。
+  两个 seam 分居两组契约，是因为它们回答的问题不同（隔离 vs 生命周期）、变化的理由也不同。
+- **fail-closed**：seam 没装、装配后被卸载、或**拒绝服务**（策略超出后端能力、解析不出可执行
+  文件）时，`run_command` 抛 `SandboxUnavailableError`，由 `ToolRuntime` 规范成结构化的
+  `failed` 结局——**绝不回退**到不经沙箱直接执行。
+- 沙箱里跑的命令，退出码与两个流仍走**同一条结果通道**（`tools/result`），下游看不出差别。
+- `EnvSandbox` 强制的是**环境收敛**（白名单之外一个都不继承，**环境变量里的**凭据不外泄）与
+  **裸命令名在收敛后 PATH 里的解析**（`argv[0]` 是裸名时跑哪个二进制由沙箱决定）；它强制不了
+  的隔离要求（例如 `deny_network`）**拒绝服务**，而不是假装生效。收敛会连带改变子进程的默认
+  文本编码，所以编码相关的变量由策略白名单留住——装配层给的是
+  `app.assembly.SHELL_ENV_ALLOWLIST`。
+- **它不做什么**（别把这一层当成完整沙箱）：**不隔离文件系统**——子进程的 cwd 就是 agent 的
+  cwd，一条 `run_command`（例如 `python -c`）能读走仓库根的 `config.json` 或
+  `~/.aws/credentials`；**不强制断网**——`deny_network` 只是拒绝，不是隔离机制；**白名单只管
+  环境变量**——`HOME` / `USERPROFILE` 仍在白名单里，磁盘上的凭据文件与 socket 都不在它的
+  射程内；**绝对路径不受限制**——`argv[0]` 带路径时 `_resolve` 原样放行，「跑哪个二进制由
+  沙箱决定」只对裸名成立。
 
 ### 写盘：有界写后缓冲 + 屏障 + 三个检查点
 
@@ -136,6 +168,11 @@ class AuditPlugin(Plugin):
 | **S5** | `Session` 投影（纯函数） | 确定且幂等；只含 model-visible 事件；压缩是 surface 替换、原日志可重放；`session_from_messages` 往返等价 |
 
 事件总线原语与插件装载 / disposer 是框架原语，按规格**不设 seam**。
+
+沙箱 seam 也不是新的**测试** seam（规格只新增「进程边界」一个）：它没有独立的进程语义，
+可观察行为分别落在 `providers/sandbox/test_env_sandbox.py`（它真能强制的维度）与
+`tests/test_sandbox.py`（装配后的 fail-closed 失败注入 + 非空洞对照）；「沙箱不负责终止」
+的证据在 `tests/test_shell.py` 那条外部终止受管范围的用例里（同一条命令先过沙箱）。
 
 ## 7. 运行
 

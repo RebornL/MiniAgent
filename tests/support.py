@@ -6,11 +6,19 @@
 """
 from __future__ import annotations
 
+import sys
+
+from capabilities.shell.definition import RUN_COMMAND_NAME, RUN_COMMAND_TOOL
+from capabilities.shell.provider import ShellTool
 from miniharness.core import Context
 from miniharness.loop import Loop
+from miniharness.sandbox.contract import SandboxPolicy
 from miniharness.session import Session
+from miniharness.tools.contract import ToolDefinition
 from miniharness.tools.runtime import ToolRuntime
 from providers.mock import MockLLM
+from providers.process import SubprocessSeam
+from providers.sandbox import EnvSandbox
 
 
 CALC_PARAMS = {"expression": {"type": "string"}}
@@ -31,6 +39,40 @@ def _assemble(llm: MockLLM, *, plugins=(), tools=(), session: Session | None = N
     for tool in tools:
         runtime.register(tool)
     return ctx, session, loop, runtime
+
+
+def _marker_command(marker) -> list[str]:
+    """一条「执行了就留下文件」的命令：用来证明工具体到底跑没跑（沙箱 / shell 集成共用）。"""
+    return [sys.executable, "-c", f"open(r'{marker}', 'w', encoding='utf-8').write('ran')"]
+
+
+def _shell_harness(*, seam: SubprocessSeam | None = None,
+                   sandbox: EnvSandbox | None = None, load_sandbox: bool = True,
+                   plugin=None, tool: ShellTool | None = None, approver: bool = False,
+                   policy: SandboxPolicy | None = None) -> tuple[Context, ToolRuntime]:
+    """`run_command` 的最小装配：工具流水线 + 受管范围 seam +（可选）沙箱 seam。
+
+    `tests/test_shell.py` 与 `tests/test_sandbox.py` 共用这一份：前者用 `seam` / `plugin` /
+    `tool` / `approver` 验进程边界与审批，后者用 `load_sandbox=False` 做**失败注入**
+    （不装载沙箱 seam）。返回 `(ctx, runtime)`，两处按需取用。
+    """
+    ctx = Context()
+    ctx.provide("session", Session())
+    runtime = ToolRuntime()
+    ctx.load(runtime)
+    ctx.load(seam or SubprocessSeam())
+    if load_sandbox:
+        ctx.load(sandbox or EnvSandbox())
+    if plugin is not None:
+        ctx.load(plugin)
+    if approver:
+        ctx.on("tools/approve", lambda payload, next_: {"kind": "allow"})
+    shell = tool or ShellTool(policy=policy)
+    ctx.load(shell)
+    runtime.register(ToolDefinition(
+        RUN_COMMAND_NAME, RUN_COMMAND_TOOL["function"]["description"],
+        RUN_COMMAND_TOOL["function"]["parameters"], lambda args: shell.run_command(**args)))
+    return ctx, runtime
 
 
 def _scripted(tool_name: str, args: dict, text: str) -> MockLLM:

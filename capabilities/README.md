@@ -30,7 +30,8 @@
 | `tracing` 追踪 | `capabilities.tracing.definition`（`Span` / `AgentTracer`） | `capabilities.tracing.provider`（`TraceConsumer`） | `capabilities.persistence.provider`（把 span 一并落盘） |
 | `skills` 技能 | `capabilities.skills.definition`（`Skill` / `SkillManager` / `active_skills` + `skill/*` 事件词汇） | `capabilities.skills.provider`（`SkillRegistry`） | `capabilities.skills.consumer`（`SystemPromptPlugin`）、`app.assembly`（重放 `skill/*` 事件恢复技能状态） |
 | `permission` 审批 | `miniharness.tools.runtime` 的 `tools/pre-execute` 决策词汇（`allow` / `ask` / `deny`） | `capabilities.permission.provider`（`PermissionPlugin`：拒绝名单 + 审批名单） | `miniharness.tools.runtime`（按决策决定是否执行工具体）、`app.assembly`（对 `run_command` 装 `ask`：无审批者默认拒绝） |
-| `shell` 命令执行 | `capabilities.shell.definition`（argv-only 的调用语义、结果形状 `exit_code` / `stdout` / `stderr`、`DEFAULT_OUTPUT_LIMIT` 与截断标记） | `capabilities.shell.provider`（`ShellTool`：受管范围的第一个真实消费者，不设超时、不终止） | `app.assembly`（注册 `shell` 技能、装审批策略）；工具是 `app.tools` 同类技能的 `run_command` |
+| `sandbox` 沙箱 | `miniharness.sandbox.contract`（`SandboxSeam.wrap(调用意图, 策略) -> 可执行的 argv + 完整性要求`；不可用即 `SandboxUnavailableError`） | `providers.sandbox`（`EnvSandbox`：环境收敛 + argv 解析；强制不了的要求拒绝服务；**不负责终止**） | `capabilities.shell.provider`（`run_command` 的调用点：沙箱缺失或拒绝即失败，不回退到无约束执行） |
+| `shell` 命令执行 | `capabilities.shell.definition`（argv-only 的调用语义、结果形状 `exit_code` / `stdout` / `stderr`、`DEFAULT_OUTPUT_LIMIT` 与截断标记） | `capabilities.shell.provider`（`ShellTool`：沙箱 seam + 受管范围的第一个真实消费者，不设超时、不终止） | `app.assembly`（注册 `shell` 技能、装审批策略、装配两个进程边界 seam）；工具是 `app.tools` 同类技能的 `run_command` |
 | `final_output` 终结 | `miniharness.loop` 的 `agent/post-tool` 收尾协议 | `capabilities.final_output.provider`（`FinalOutputPlugin`） | `miniharness.loop`（按收尾协议结束本轮） |
 
 每条能力内部的职责说明见各自的 `capabilities/<能力>/__init__.py`。

@@ -99,7 +99,7 @@ class ToolRuntime(Plugin):
     def _pipeline(self, payload: dict, tool: ToolDefinition) -> dict:
         """pre-execute → guard → execute，返回 ok / 四种中止结局之一。"""
         name = tool.name
-        # 1) pre-execute：权限/审批/沙箱
+        # 1) pre-execute：权限 / 审批（沙箱不在这条事件上：它在工具体那层，见 shell.provider）
         decision = self._ctx.waterfall("tools/pre-execute", payload, lambda p: {"kind": "allow"})
         # 2) 单调 guard：只允许收紧（allow → ask → deny），不可反向放行
         decision = self._guard(payload, decision)

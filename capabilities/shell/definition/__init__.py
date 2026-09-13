@@ -11,19 +11,28 @@
   `*_truncated` 标记与文本尾注（`truncated_note`）里标明：一个 `yes` 不该把内存吃光。
 - **不拥有进程生命周期**：本能力不设超时、不终止。命令跑在受管范围里，因此可被策略层
   终止；「何时终止」是策略层的事（超时 / 取消接线见 T8）。
+- **先过沙箱才执行**：argv 与工作目录构成**调用意图**，沙箱 seam 按策略把它包装成「可执行的
+  argv + 完整性要求」后才起进程（沙箱只包装 argv，不负责终止）；沙箱不可用即失败，
+  绝不回退到无约束执行。输出仍按 UTF-8 解码，而收敛环境会改变子进程的默认文本编码——
+  「需要让子进程用同一套编码说话」的变量由沙箱策略的白名单留住
+  （装配层给的是 `app.assembly.SHELL_ENV_ALLOWLIST`）。
 """
 from __future__ import annotations
 
-__all__ = ["DEFAULT_OUTPUT_LIMIT", "RUN_COMMAND_TOOL", "truncated_note"]
+__all__ = ["DEFAULT_OUTPUT_LIMIT", "RUN_COMMAND_NAME", "RUN_COMMAND_TOOL", "truncated_note"]
 
 #: 每个输出流最多保留的字节数：超出即截断并标记（内存与结果都因此有界）。
 DEFAULT_OUTPUT_LIMIT = 64 * 1024
+
+#: `run_command` 的工具名——**唯一一处知识**：工具定义、装配层的审批名单 / 技能 `tool_map`、
+#: CLI 的审批范围都从这里取，改名时不会出现「审批门按旧名装、工具按新名注册」的静默失效。
+RUN_COMMAND_NAME = "run_command"
 
 #: `run_command` 的工具定义（OpenAI 形状），与 `app.tools` 里的技能工具同形。
 RUN_COMMAND_TOOL = {
     "type": "function",
     "function": {
-        "name": "run_command",
+        "name": RUN_COMMAND_NAME,
         "description": (
             "在受管范围里执行一个外部命令，返回退出码 / stdout / stderr。"
             "命令必须以 argv 列表逐项给出（不经 shell），例如 [\"git\", \"status\"]；"

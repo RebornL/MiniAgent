@@ -19,6 +19,8 @@
 | `tests/test_capabilities.py` | S2 + 契约等价 | 压缩达同样阈值才触发且摘要语义与契约包逐字一致；终结工具不再采样 |
 | `tests/test_shell.py` | 进程边界（真实子进程）+ S2（装配） | `run_command`：真实子进程的输出与退出码、参数不经 shell 原样送达、`cwd` 生效、真实洪泛输出被截断、命令跑在受管范围里且可被外部终止、被拒时工具体未执行、装配层默认不装载 `shell` 技能且对 `run_command` 默认拒绝 |
 | `tests/test_app.py` | S2（装配） | `build_harness` 的工具懒注册与落盘、技能装载、`resume_session` 只靠重放日志恢复（压缩后的投影逐字一致、技能状态与领域提示仍在、`meta.json` 无 summary/active_skills 旁路）、真实 v0 旧会话迁移后技能工具已注册且摘要链非空、`meta.json` 不存模型可见内容的拷贝、全新 clone 上 `import app` 不读 config.json |
+| `tests/test_sandbox.py` | 沙箱 seam（装配 + 真实子进程） | `run_command` 先过沙箱：命令在收敛后的环境里跑（子进程拿到沙箱标记、拿不到父进程凭据）、退出与输出走同一条结果通道；**失败注入**——沙箱没装 / 装配后被卸载 / 拒绝服务时 `failed` 且命令真的没跑（marker 文件不存在），每处都附「装上可用沙箱后同一条命令 `ok` 且 marker 写入」的非空洞对照；装配层的 `build_harness` 装的确实是这个沙箱 |
+| `tests/test_cli_approval.py` | 审批闸门（装配 + CLI） | CLI 审批者裁决 `run_command`：请求展示完整 argv 与 cwd、放行才执行、拒绝沿用 `denied` 且工具体未执行、非交互输入（非 TTY / 管道 / EOF）默认拒绝、其它工具不经审批 |
 
 ## 运行
 

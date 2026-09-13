@@ -1,6 +1,6 @@
 """跨包集成：`run_command`（`capabilities.shell` + `providers.process` + `app.assembly`）。
 
-票面要求的三条**真实子进程**验收：
+票面要求的三条**真实子进程**验收（命令先过沙箱 seam，再进受管范围）：
 
 1. 正常命令返回它的输出与退出码（非零退出码是正常结果，不是「失败」结局）；
 2. 命令确实跑在受管范围里——拿到范围句柄后**可被外部终止**，工具随之返回；
@@ -18,41 +18,26 @@ import sys
 import threading
 import time
 
-from app.assembly import build_harness
+from app.assembly import SHELL_ENV_ALLOWLIST, build_harness
 from capabilities.permission.provider import PermissionPlugin
-from capabilities.shell.definition import RUN_COMMAND_TOOL, truncated_note
+from capabilities.shell.definition import truncated_note
 from capabilities.shell.provider import ShellTool
-from miniharness.core import Context
-from miniharness.session import Session
-from miniharness.tools.contract import DENIED, OK, ToolDefinition
+from miniharness.sandbox.contract import SandboxPolicy
+from miniharness.tools.contract import DENIED, OK
 from miniharness.tools.runtime import ToolRuntime
 from providers.mock import MockLLM
 from providers.process import SubprocessRange, SubprocessSeam
+from tests.support import _marker_command, _shell_harness
 
-
-def _marker_command(marker) -> list[str]:
-    """一条「执行了就留下文件」的命令：用来证明工具体到底跑没跑。"""
-    return [sys.executable, "-c", f"open(r'{marker}', 'w', encoding='utf-8').write('ran')"]
+#: 与装配层同一份沙箱策略（`app.assembly.SHELL_ENV_ALLOWLIST`）：这里验的是装配后的行为。
+_POLICY = SandboxPolicy(env_allowlist=SHELL_ENV_ALLOWLIST)
 
 
 def _harness(*, seam: SubprocessSeam | None = None, plugin=None,
              tool: ShellTool | None = None, approver: bool = False) -> ToolRuntime:
-    """最小装配：工具流水线 + seam + 可选审批策略 + `run_command`。"""
-    ctx = Context()
-    ctx.provide("session", Session())
-    runtime = ToolRuntime()
-    ctx.load(runtime)
-    ctx.load(seam or SubprocessSeam())
-    if plugin is not None:
-        ctx.load(plugin)
-    if approver:
-        ctx.on("tools/approve", lambda payload, next_: {"kind": "allow"})
-    shell = tool or ShellTool()
-    ctx.load(shell)
-    runtime.register(ToolDefinition(
-        "run_command", RUN_COMMAND_TOOL["function"]["description"],
-        RUN_COMMAND_TOOL["function"]["parameters"], lambda args: shell.run_command(**args)))
-    return runtime
+    """最小装配：工具流水线 + 受管范围 seam + 沙箱 seam + 可选审批策略 + `run_command`。"""
+    return _shell_harness(seam=seam, plugin=plugin, tool=tool,
+                          approver=approver, policy=_POLICY)[1]
 
 
 def test_run_command_reports_stdout_stderr_and_exit_code():
@@ -134,7 +119,7 @@ def test_the_command_runs_in_a_managed_range_and_can_be_terminated_from_outside(
 def test_a_real_flood_is_capped():
     """真实输出流超限也会被截断：`yes` 那类洪泛既撑不爆内存，也照样给出退出码。"""
     limit = 512
-    runtime = _harness(tool=ShellTool(limit=limit))
+    runtime = _harness(tool=ShellTool(limit=limit, policy=_POLICY))
 
     value = runtime.run({"id": "c1", "name": "run_command", "args": {"argv": [
         sys.executable, "-c", "print('x' * 200000)"]}})["value"]
