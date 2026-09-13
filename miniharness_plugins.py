@@ -21,8 +21,7 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as _FutureTimeout
+import threading
 from typing import Any, Callable, Iterable
 
 import AgentTrace
@@ -165,6 +164,10 @@ class ToolTimeoutPlugin(Plugin):
     与 legacy `CallFunc.call_with_timeout` 的**有意差别**（用户裁定）：超时不再伪装成
     一个 `ok` 的字符串结果，而是抛出异常，让权威结果明确是 `error`，下游可按 status 区分
     「超时」与「成功」。默认超时沿用 `CallFunc.DEFAULT_TOOL_TIMEOUT`；工具可用 `timeoutMs` 覆盖。
+
+    **超时只能「停止等待」，不能「取消执行」**：Python 杀不掉线程，被放弃的工具体仍会跑到底
+    （结果丢弃、无副作用回滚）。因此工具体一律跑在 **daemon** 线程里——legacy 用的
+    `ThreadPoolExecutor` 会在解释器退出时 join 它的 worker，一个卡死的工具能把进程挂到它跑完。
     """
 
     inject = ("tools",)
@@ -177,16 +180,26 @@ class ToolTimeoutPlugin(Plugin):
 
     def _wrap(self, payload: dict, next_: Callable[[], Any]) -> Any:
         timeout_ms = payload.get("timeoutMs") or self.default_ms
-        executor = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = executor.submit(next_)
-            return future.result(timeout=timeout_ms / 1000)
-        except _FutureTimeout:
+        outcome: list[Any] = []
+        failure: list[BaseException] = []
+        finished = threading.Event()
+
+        def invoke() -> None:
+            try:
+                outcome.append(next_())
+            except BaseException as exc:       # 工具体异常照常上抛，由 ToolRuntime 收敛
+                failure.append(exc)
+            finally:
+                finished.set()
+
+        threading.Thread(target=invoke, daemon=True).start()
+        if not finished.wait(timeout_ms / 1000):
             raise ToolTimeout(
                 f"工具 {payload['call'].get('name')} 执行超时（{timeout_ms}ms 未返回）"
-            ) from None
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            )
+        if failure:
+            raise failure[0]
+        return outcome[0]
 
 
 # ═══════════════ 输出校验：Structure → tools/post-execute ═══════════════

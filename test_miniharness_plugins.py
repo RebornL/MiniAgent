@@ -10,7 +10,10 @@ Story 15「行为不变」在每个插件上都与既有模块的直接调用结
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -298,6 +301,35 @@ def test_timeout_plugin_reports_timeout_as_error():
                               ToolDefinition("fast", "", {}, lambda a: "快", timeoutMs=1000))
     ok = ok_runtime.run({"id": "c2", "name": "fast", "args": {}})
     assert ok["status"] == "ok" and ok["content"] == "快"
+
+
+def test_timeout_does_not_block_process_exit():
+    """超时后必须立即返回，且卡死的工具体不得拖住进程退出。
+
+    工具体跑在无法被杀死的线程里，超时只能「停止等待」、不能「取消执行」。但 worker
+    必须是 daemon 线程：legacy 的 `ThreadPoolExecutor` 会在解释器退出时 join 它的
+    worker，于是一个卡死的工具能把整个进程挂到它跑完。用子进程验证这两点。
+    """
+    script = (
+        "import time\n"
+        "from miniharness import Context, Session, ToolDefinition, ToolRuntime\n"
+        "from miniharness_plugins import ToolTimeoutPlugin\n"
+        "ctx = Context()\n"
+        'ctx.provide("session", Session())\n'
+        "rt = ToolRuntime()\n"
+        "ctx.load(rt)\n"
+        "ctx.load(ToolTimeoutPlugin(default_ms=50))\n"
+        'rt.register(ToolDefinition("hang", "", {}, lambda a: time.sleep(30)))\n'
+        "t0 = time.time()\n"
+        'r = rt.run({"id": "c1", "name": "hang", "args": {}})\n'
+        'assert r["status"] == "error", r\n'
+        'assert time.time() - t0 < 5, "超时后应立即返回，不等工具体跑完"\n'
+        'print("timeout-ok")\n'
+    )
+    proc = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).parent,
+                          capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "timeout-ok"
 
 
 def test_validation_plugin_reuses_structure_semantics():
