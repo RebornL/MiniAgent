@@ -1,10 +1,12 @@
-"""miniharness_deepseek.py — LLM seam 的真实 provider（DeepSeek / OpenAI 兼容接口）
+"""providers.deepseek — LLM seam 的真实 provider（DeepSeek / OpenAI 兼容接口）
 
 `miniharness-spec.md` 的「能力 seam」在这里落到真实后端：`DeepSeekProvider` 只实现
 `complete(messages) -> {"text", "tool_calls"}`，工具描述经 `ctx.get("tools").specs()` 自取；
 循环与其他插件完全不认识它（换 provider 不动循环）。
 
-import 本模块不做任何网络调用；真实联调 demo：`python miniharness_deepseek.py`。
+它只依赖契约包 `miniharness.llm.contract`（`LLM`）与 `miniharness.core`（`Context`），
+不认识任何能力族。import 本模块不做任何网络调用；真实联调 demo 在装配族：
+`python -m app.deepseek_demo`。
 """
 from __future__ import annotations
 
@@ -13,7 +15,8 @@ from typing import Any, Callable
 
 from openai import OpenAI
 
-from miniharness import Context, LLM
+from miniharness.core import Context
+from miniharness.llm.contract import LLM
 
 __all__ = ["DeepSeekProvider"]
 
@@ -137,55 +140,3 @@ def _wire_messages(messages: list[dict]) -> list[dict]:
             for call in calls
         ]})
     return wire
-
-
-# ═══════════════ 真实联调 demo（会发起网络调用，不在测试里跑） ═══════════════
-def _demo() -> None:
-    """装配 harness + 真实 DeepSeek：一个 calculate 工具 + final_output 终结。
-
-    `python miniharness_deepseek.py`（需要 config.json 里的凭据）
-    """
-    from miniharness import Loop, Session, ToolDefinition, ToolRuntime
-    from miniharness_plugins import FinalOutputPlugin
-
-    with open("config.json", "r", encoding="utf-8") as f:
-        config = json.load(f)
-
-    ctx = Context()
-    ctx.provide("session", Session())
-    loop = Loop()
-    ctx.load(loop)
-    ctx.load(ToolRuntime())
-    ctx.load(FinalOutputPlugin())
-    ctx.load(DeepSeekProvider(
-        OpenAI(base_url=config["base_url"], api_key=config["api_key"]),
-        "deepseek-v4-flash",
-        on_delta=lambda text: print(text, end="", flush=True),
-    ))
-
-    runtime: ToolRuntime = ctx.get("tools")
-    runtime.register(ToolDefinition(
-        name="calculate", description="执行数学计算，输入数学表达式",
-        parameters={"type": "object",
-                    "properties": {"expression": {"type": "string", "description": "数学表达式"}},
-                    "required": ["expression"]},
-        execute=lambda args: str(eval(args["expression"])),  # noqa: S307 - demo only
-    ))
-    runtime.register(ToolDefinition(
-        name="final_output", description="以结构化格式输出最终答案，调用即表示回答完成。",
-        parameters={"type": "object",
-                    "properties": {"result": {"type": "object", "description": "结构化结果"},
-                                   "summary": {"type": "string", "description": "一句话总结"}},
-                    "required": ["result"]},
-        execute=lambda args: json.dumps(args, ensure_ascii=False),
-    ))
-
-    session: Session = ctx.get("session")
-    print("🧠 ", end="", flush=True)
-    answer = loop.turn("用 calculate 算出 156*23，再用 final_output 输出结果")
-    print(f"\nturn -> {answer}")
-    print("log  ->", [(e["seq"], e["type"]) for e in session.events])
-
-
-if __name__ == "__main__":
-    _demo()

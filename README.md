@@ -4,6 +4,8 @@
 
 **改策略不改循环**：重试、超时、压缩、输出校验、终结、持久化、追踪都是挂在事件 seam 上的插件，循环体里没有任何策略分支。架构与扩展方式见 [`docs/miniharness.md`](docs/miniharness.md)。
 
+工程按能力族包化：能力落成**契约（Definition）/ 实现（Provider）/ 消费方（Consumer）**三个具名角色、分属不同包，契约与高频变动的实现按变化速率分开。各族包地图见 `miniharness/`、`capabilities/`、`providers/`、`app/`、`tests/` 下的 `README.md`；新代码落位、命名、依赖方向与测试放置的规范见 [`docs/packaging.md`](docs/packaging.md)。
+
 ## 环境要求
 
 - Python 3.10+
@@ -34,10 +36,10 @@ pip install -r requirements.txt
 ### 2. 运行
 
 ```bash
-python MiniAgent.py
+python -m app
 ```
 
-进入交互式对话循环。
+进入交互式对话循环（等价于包化之前的 `python MiniAgent.py`）。
 
 | 命令 | 作用 |
 |------|------|
@@ -49,20 +51,55 @@ python MiniAgent.py
 
 ## 项目结构
 
+五个族，每个族一份权威包地图（`README.md`）：
+
 ```
 MiniAgent/
-├── MiniAgent.py            # 应用装配：工具、技能、build_harness、chat_loop
-├── miniharness.py          # harness 骨架：5 原语 + ToolRuntime + 零策略 Loop
-├── miniharness_plugins.py  # 策略插件：压缩/重试/超时/校验/终结/持久化/追踪/技能
-├── miniharness_deepseek.py # 真实 LLM provider（DeepSeek / OpenAI 兼容）
-├── SkillManager.py         # Skill 系统
-├── AgentTrace.py           # 执行追踪
-├── Compaction.py           # 上下文压缩
-├── Persistence.py          # 会话持久化
-├── RetryFunc.py            # 重试机制
-├── CallFunc.py             # 工具调用超时
-├── Structure.py            # 结构化输出与 schema 校验
-├── requirements.txt        # 依赖
+├── miniharness/            # 骨架：低频契约与运行时
+│   ├── README.md           #   本族包地图
+│   ├── core/               #   Context（服务注册表 + 事件总线）、Plugin
+│   ├── session/            #   Session：事件日志 + 投影/逆投影（+ test_projection.py）
+│   ├── tools/
+│   │   ├── contract/       #   ToolDefinition（工具契约）
+│   │   └── runtime/        #   ToolRuntime（执行流水线；+ test_pipeline.py）
+│   ├── llm/contract/       #   LLM（LLM 契约）
+│   └── loop/               #   Loop：驱动 + 派发事件（零策略）
+├── capabilities/           # 能力族：契约 / 实现 / 消费方三分
+│   ├── README.md           #   包地图：每个能力的三个角色落在哪个包
+│   ├── compaction/         #   definition/ + provider/
+│   ├── persistence/        #   definition/ + provider/
+│   ├── retry/              #   definition/ + provider/（+ test_retry.py）
+│   ├── timeout/            #   definition/ + provider/（+ test_timeout.py）
+│   ├── validation/         #   definition/ + provider/（+ test_validation.py）
+│   ├── tracing/            #   definition/ + provider/
+│   ├── skills/             #   definition/ + provider/（+ test_skills.py）+ consumer/
+│   ├── permission/         #   provider/
+│   └── final_output/       #   provider/
+├── providers/              # 后端族：骨架 seam 的实现
+│   ├── README.md           #   本族包地图
+│   ├── deepseek/           #   真实 LLM provider（DeepSeek / OpenAI 兼容）
+│   └── mock/               #   MockLLM（离线 provider）
+├── app/                    # 装配族：装配 + 入口 + CLI
+│   ├── README.md           #   本族包地图
+│   ├── config.py           #   config.json 的惰性读取
+│   ├── tools.py            #   应用侧工具定义与技能描述
+│   ├── assembly.py         #   build_harness() / resume_session()
+│   ├── cli.py              #   chat_loop()
+│   ├── skeleton_demo.py    #   骨架 smoke run
+│   ├── stack_demo.py       #   全栈 smoke run
+│   ├── deepseek_demo.py    #   真实联调 demo（联网）
+│   └── __main__.py         #   python -m app
+├── tests/                  # 测试族：跨包集成集中一处
+│   ├── README.md           #   测试放置说明
+│   ├── support.py          #   集成测试共享 helper
+│   ├── test_turn.py        #   S2：turn 边界
+│   ├── test_capabilities.py #  能力协作与契约等价
+│   └── test_app.py         #   app 装配
+├── docs/
+│   ├── packaging.md        # 落位 / 命名 / 依赖方向 / 测试放置规范
+│   ├── miniharness.md      # 骨架架构与扩展方式
+│   └── review-guide-v1.md  # v1 迁移总结（记录的是 v1 平铺布局）
+├── requirements.txt
 └── config.json             # 配置文件（需自行创建）
 ```
 
@@ -73,6 +110,8 @@ python -m pytest -q
 ```
 
 测试集中在三个 seam 上：`Loop.turn`（集成）、`ToolRuntime.run`（工具管线契约）、`Session.derive_messages`（纯函数投影）。详见 [`docs/miniharness.md`](docs/miniharness.md) §6。
+
+测试与实现同层但分离：包内测试与实现放同一个包（`miniharness/session/test_projection.py`、`capabilities/*/provider/test_*.py`），跨包集成集中在 [`tests/`](tests/README.md)。放置规范见 [`docs/packaging.md`](docs/packaging.md) §6。
 
 ## License
 

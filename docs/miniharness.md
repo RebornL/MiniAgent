@@ -10,9 +10,9 @@
 
 | 原语 | 落点 | 说明 |
 | --- | --- | --- |
-| 循环驱动、事件治理 | `miniharness.py::Context` `Loop` | 事件三种派发语义：`emit`（观察）/ `waterfall`（洋葱，可 short-circuit）/ `serial`（按序，返回假则停） |
-| 会话 = append-only 事件日志 | `miniharness.py::Session` | `append` 只增不改；`derive_messages()` 是投影；`session_from_messages()` 是其逆 |
-| 能力 seam | `miniharness.py::LLM`、`ToolRuntime` | 契约 + Provider + 消费方三分，换后端不动循环 |
+| 循环驱动、事件治理 | `miniharness/core`、`miniharness/loop` | 事件三种派发语义：`emit`（观察）/ `waterfall`（洋葱，可 short-circuit）/ `serial`（按序，返回假则停） |
+| 会话 = append-only 事件日志 | `miniharness/session` | `append` 只增不改；`derive_messages()` 是投影；`session_from_messages()` 是其逆 |
+| 能力 seam | `miniharness/llm/contract`、`miniharness/tools/{contract,runtime}`、`providers/` | 契约 + Provider + 消费方三分，换后端不动循环 |
 | 依赖注入、按需激活 | `Plugin.inject`、`Context.load` | 依赖未就绪则挂起，就绪后自动激活 |
 | 注册可逆 | `Context.effect`、`Context.unload` | 每个注册返回 disposer，卸载逆序 unwind |
 
@@ -35,15 +35,19 @@ flowchart TB
 
 `deny` 不产生权威结果：落 `tool/denied`、不发 `tools/result`、工具体不执行。
 
-## 3. 文件地图
+## 3. 包地图
 
-| 文件 | 职责 |
-| --- | --- |
-| `miniharness.py` | 5 原语 + `ToolRuntime` + 零策略 `Loop` + `MockLLM` + `PermissionPlugin` |
-| `miniharness_plugins.py` | 迁移层：把 legacy 的内联策略变成事件订阅者 |
-| `miniharness_deepseek.py` | 真实 provider（DeepSeek / OpenAI 兼容），只实现 `complete(messages)` |
-| `MiniAgent.py` | 应用装配：工具、技能、`build_harness()`、`chat_loop()` |
-| `test_miniharness*.py` | 三个 seam 上的测试 |
+工程按能力族包化：契约低频、实现高频，二者不同包。五个族各有一份权威包地图（族内 `README.md`）：
+
+| 族 | 内容 | 包地图 |
+| --- | --- | --- |
+| `miniharness/` | 骨架：`core`（Context/Plugin）、`session`（事件日志 + 投影）、`tools/{contract,runtime}`、`llm/contract`、`loop`（零策略） | [`miniharness/README.md`](../miniharness/README.md) |
+| `capabilities/` | 能力族：每个能力按 `definition`（契约）/ `provider`（实现）/ `consumer`（消费方）拆包——压缩 / 持久化 / 重试 / 超时 / 校验 / 追踪 / 技能 / 审批 / 终结 | [`capabilities/README.md`](../capabilities/README.md) |
+| `providers/` | 后端族：`deepseek`（真实）、`mock`（离线） | [`providers/README.md`](../providers/README.md) |
+| `app/` | 装配族：`config` / `tools` / `assembly`（`build_harness`）/ `cli`（`chat_loop`）/ `__main__` | [`app/README.md`](../app/README.md) |
+| `tests/` | 测试族：跨包集成集中一处；包内测试与实现同层 | [`tests/README.md`](../tests/README.md) |
+
+落位、命名、依赖方向与测试放置的规范见 [`docs/packaging.md`](packaging.md)。
 
 ## 4. 迁移对照
 
@@ -52,7 +56,7 @@ flowchart TB
 | `ctx.maybe_compact(...)` | `CompactionPlugin` → `agent/pre-step`（surface 替换） |
 | `with_retry(...)` | `RetryPlugin` → `tools/execute`（around） |
 | `call_with_timeout(...)` | `ToolTimeoutPlugin` → `tools/execute`（around） |
-| `Structure` 校验 / sanitize | `ValidationPlugin` → `tools/post-execute` |
+| 输出校验 / sanitize | `ValidationPlugin` → `tools/post-execute` |
 | `pm.save_session(...)` | `PersistenceConsumer` → Session 日志订阅 |
 | `tracer.*(...)` | `TraceConsumer` → Session 日志订阅 |
 | `skills.load` + 工具注册 | `SkillRegistry` → `ToolRuntime` 可逆注册 |
@@ -80,7 +84,7 @@ flowchart TB
 
 ### 一处未装
 
-`build_harness()` **不装 `PermissionPlugin`**——legacy 没有审批概念，装了会改变行为。审批能力本身在 `miniharness.py` 里，需要时按 §5 自行装配。
+`build_harness()` **不装 `PermissionPlugin`**——legacy 没有审批概念，装了会改变行为。审批能力本身在 `capabilities/permission/provider/` 里，需要时按 §5 自行装配。
 
 ## 5. 怎么加一个策略（不碰 Loop）
 
@@ -113,14 +117,14 @@ class AuditPlugin(Plugin):
 ```bash
 pip install -r requirements.txt
 # 在项目根目录创建 config.json（已 .gitignore）
-python MiniAgent.py
+python -m app
 ```
 
 离线跑（不联网，用 mock provider）：
 
 ```python
-from MiniAgent import build_harness
-from miniharness import MockLLM
+from app.assembly import build_harness
+from providers.mock import MockLLM
 
 llm = (MockLLM()
        .then_tool_call("load_skill", {"name": "calculator"})
@@ -129,6 +133,14 @@ llm = (MockLLM()
 ctx, session, loop = build_harness(model="mock", llm=llm, store_dir="./agent_sessions")
 print(loop.turn("6*7 是多少"))
 print([e["type"] for e in session.events])
+```
+
+不写代码的离线 smoke run：
+
+```bash
+python -m app.skeleton_demo     # 骨架：依赖驱动激活顺序 + deny 分支
+python -m app.stack_demo        # 全栈：压缩 / 重试 / 超时 / 持久化 / 追踪 / 技能
+python -m app.deepseek_demo     # 真实联调（需根目录 config.json，会联网）
 ```
 
 测试：
@@ -143,26 +155,28 @@ python -m pytest -q
 
 ```mermaid
 flowchart TB
-    subgraph app["应用层（MiniAgent.py）"]
-        CL["chat_loop()"]
-        BH["build_harness()"]
+    subgraph app["装配层（app/）"]
+        CL["app.cli<br/>chat_loop()"]
+        BH["app.assembly<br/>build_harness()"]
     end
-    subgraph core["骨架（miniharness.py）"]
-        CTX["Context<br/>服务注册表 + 事件总线"]
-        SESS["Session<br/>append-only 事件日志"]
-        LOOP["Loop<br/>驱动 + 派发事件"]
-        TRT["ToolRuntime<br/>工具执行流水线"]
-        LLMS["LLM<br/>能力 seam 契约"]
+    subgraph core["骨架（miniharness/）"]
+        CTX["core<br/>Context 服务注册表 + 事件总线"]
+        SESS["session<br/>Session append-only 事件日志"]
+        LOOP["loop<br/>Loop 驱动 + 派发事件"]
+        TRT["tools.runtime<br/>ToolRuntime 执行流水线"]
+        LLMS["llm.contract<br/>LLM 能力 seam 契约"]
     end
-    subgraph plugs["策略（miniharness_plugins.py）"]
-        PL1["CompactionPlugin<br/>SystemPromptPlugin"]
-        PL2["RetryPlugin<br/>ToolTimeoutPlugin"]
-        PL3["ValidationPlugin<br/>FinalOutputPlugin"]
-        PL4["PersistenceConsumer<br/>TraceConsumer"]
-        PL5["SkillRegistry"]
+    subgraph plugs["能力（capabilities/）"]
+        PL1["compaction.provider<br/>skills.consumer"]
+        PL2["retry.provider<br/>timeout.provider"]
+        PL3["validation.provider<br/>final_output.provider"]
+        PL4["persistence.provider<br/>tracing.provider"]
+        PL5["skills.provider"]
     end
-    PROV["DeepSeekProvider"]
-    MOCK["MockLLM"]
+    subgraph prov["后端（providers/）"]
+        PROV["deepseek<br/>DeepSeekProvider"]
+        MOCK["mock<br/>MockLLM"]
+    end
     BH --> CTX
     CL --> LOOP
     LOOP --> SESS

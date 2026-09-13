@@ -1,6 +1,7 @@
 # review-guide-v1 —— miniharness 迁移总结与审视指南
 
 > 对应提交 `813d3bb`。本文用途：① 说清这轮改了哪些东西；② 说清迁移是怎么做的；③ 给出一条能独立复核整个工程的路径（读什么、跑什么、怀疑什么）。
+> **注意：本文记的是 v1 平铺布局（`miniharness.py` / `miniharness_plugins.py` / `MiniAgent.py` / `test_miniharness*.py`）。v2-T1 已按能力族包化，模块路径与入口命令见 [`docs/packaging.md`](packaging.md) 与各族 `README.md`；代码本体未变。**
 > 相关文档：[`docs/miniharness.md`](miniharness.md)（架构）、[`miniharness-spec.md`](../miniharness-spec.md)（规格）、[`MiniAgent-Harness-Design.md`](../MiniAgent-Harness-Design.md)（三方对比与设计）、[`MiniAgent-vs-Codex-Harness.md`](../MiniAgent-vs-Codex-Harness.md)（Codex 深挖）。
 
 ## 1. 做了什么

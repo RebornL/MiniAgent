@@ -1,13 +1,12 @@
-"""MiniAgent 真实入口迁移到 miniharness 后的装配测试 —— 仍然落在 S2（turn 边界）：
+"""跨包集成：app 装配（`build_harness` / `resume_session`）。
 
-- `build_harness` 装配的 harness 能跑通一次 turn，并把日志落进持久化 store；
+- 装配的 harness 能跑通一次 turn，并把日志落进持久化 store；
 - 工具懒注册：只随技能装载可用（与 legacy `get_active_tools()` 同语义）；
 - `register_skills` 注册的技能可经 `load_skill` 装载，`final_output` 借此终结本轮；
 - `resume_session` 恢复 messages / summary / active_skills；
-- 导入期不碰 config.json（全新 clone 上 `import MiniAgent` 必须成功）。
+- 导入期不碰 config.json（全新 clone 上 `import app` 必须成功）。
 
-`test_miniharness.py` / `test_miniharness_plugins.py` 覆盖 harness 与插件本身，不重复。
-运行：`python -m pytest test_miniharness_agent.py -v`
+运行：`python -m pytest tests/test_app.py -v`
 """
 from __future__ import annotations
 
@@ -18,9 +17,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from MiniAgent import build_harness, resume_session
-from Persistence import PersistenceManager, Store
-from miniharness import MockLLM
+from app.assembly import build_harness, resume_session
+from capabilities.persistence.definition import PersistenceManager, Store
+from providers.mock import MockLLM
+
 
 
 def test_build_harness_keeps_tools_lazy_until_the_skill_is_loaded(tmp_path):
@@ -109,14 +109,15 @@ def test_resume_session_restores_messages_summary_and_active_skills(tmp_path):
 
 
 def test_import_works_on_a_fresh_clone_without_config_json(tmp_path):
-    """config.json 在 .gitignore 里：没有它也必须能 `import MiniAgent`（导入期不读配置）。"""
-    root = Path(__file__).parent
-    for source in root.glob("*.py"):
-        shutil.copy(source, tmp_path / source.name)
+    """config.json 在 .gitignore 里：没有它也必须能 `import app`（导入期不读配置）。"""
+    root = Path(__file__).resolve().parents[1]
+    for package in ("app", "capabilities", "miniharness", "providers", "tests"):
+        shutil.copytree(root / package, tmp_path / package,
+                        ignore=shutil.ignore_patterns("__pycache__"))
     assert not (tmp_path / "config.json").exists()
 
     proc = subprocess.run(
-        [sys.executable, "-c", "import MiniAgent; print('ok')"],
+        [sys.executable, "-c", "import app; print('ok')"],
         cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(tmp_path)},
         capture_output=True, text=True,
     )
