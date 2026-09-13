@@ -29,7 +29,7 @@ from typing import Any, Callable, Iterator
 from openai import OpenAI
 
 from app import assembly
-from capabilities.persistence.definition import PersistenceManager, Store
+from capabilities.persistence.provider import PersistenceManager, Store
 from capabilities.shell.definition import RUN_COMMAND_NAME
 from miniharness.core import Context
 from miniharness.llm.contract import LLM

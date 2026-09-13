@@ -17,8 +17,7 @@ from app import config, tools
 from capabilities.compaction.provider import CompactionPlugin
 from capabilities.final_output.provider import FinalOutputPlugin
 from capabilities.permission.provider import PermissionPlugin
-from capabilities.persistence.definition import PersistenceManager, Store
-from capabilities.persistence.provider import PersistenceConsumer
+from capabilities.persistence.provider import PersistenceConsumer, PersistenceManager, Store
 from capabilities.retry.provider import RetryPlugin
 from capabilities.shell.definition import RUN_COMMAND_NAME, RUN_COMMAND_TOOL
 from capabilities.shell.provider import ShellTool

@@ -11,8 +11,7 @@ import os
 
 import pytest
 
-from capabilities.persistence.definition import PersistenceManager, Store
-from capabilities.persistence.provider import PersistenceConsumer
+from capabilities.persistence.provider import PersistenceConsumer, PersistenceManager, Store
 from miniharness.core import Context
 from miniharness.session import Session
 

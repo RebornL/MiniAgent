@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from capabilities.persistence.definition import (
+from capabilities.persistence.provider import (
     LEGACY_MESSAGES_FILE,
     LOG_FORMAT,
     LOG_VERSION,

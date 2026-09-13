@@ -7,8 +7,7 @@ from __future__ import annotations
 
 from capabilities.compaction.definition import CompactionConfig
 from capabilities.compaction.provider import CompactionPlugin
-from capabilities.persistence.definition import PersistenceManager, Store
-from capabilities.persistence.provider import PersistenceConsumer
+from capabilities.persistence.provider import PersistenceConsumer, PersistenceManager, Store
 from capabilities.retry.provider import RetryPlugin
 from capabilities.skills.definition import Skill
 from capabilities.skills.provider import SkillRegistry

@@ -22,7 +22,7 @@ from pathlib import Path
 
 from app.assembly import build_harness, resume_session
 from capabilities.compaction.definition import compaction_summaries
-from capabilities.persistence.definition import META_FILE, PersistenceManager, Store
+from capabilities.persistence.provider import META_FILE, PersistenceManager, Store
 from miniharness.session import Session
 from providers.mock import MockLLM
 

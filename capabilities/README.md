@@ -23,7 +23,7 @@
 | 能力 | Definition（契约包） | Provider（实现包） | Consumer（消费方包） |
 | --- | --- | --- | --- |
 | `compaction` 压缩 | `capabilities.compaction.definition`（`CompactionConfig` / `ContextManager` / `to_text` / `compaction_summaries`） | `capabilities.compaction.provider`（`CompactionPlugin`、`stub_summarizer`） | `miniharness.session`（把压缩事件投影成 surface 替换）、`app.assembly`（重放日志恢复摘要链） |
-| `persistence` 持久化 | `capabilities.persistence.definition`（`Store` / `PersistenceManager` / 事件日志的格式版本与迁移链） | `capabilities.persistence.provider`（`PersistenceConsumer`：有界写后缓冲 + `flush()` 屏障，订阅 `agent/checkpoint` 在三个语义点 fail-closed 落盘） | `app.assembly`、`app.cli`（重放日志恢复会话、列出历史）；`miniharness.loop` 只**派发 `agent/checkpoint` seam 事件**（每步开始前 / 模型请求前 / 工具派发前），不 import 本能力的任何契约 |
+| `persistence` 持久化 | `capabilities.persistence.definition`（事件日志的格式版本词汇：`LOG_FORMAT` / `LOG_VERSION` / `LEGACY_LOG_VERSION` / `log_filename`） | `capabilities.persistence.provider`（`Store` / `PersistenceManager`：目录布局、`events.v<N>.jsonl` 追加写与迁移链；`PersistenceConsumer`：有界写后缓冲 + `flush()` 屏障，订阅 `agent/checkpoint` 在三个语义点 fail-closed 落盘） | `app.assembly`、`app.cli`（重放日志恢复会话、列出历史）；`miniharness.loop` 只**派发 `agent/checkpoint` seam 事件**（每步开始前 / 模型请求前 / 工具派发前），不 import 本能力的任何契约 |
 | `retry` 重试 | `capabilities.retry.definition`（`is_retryable` / `is_retryable_outcome` / `with_retry`） | `capabilities.retry.provider`（`RetryPlugin`） | `miniharness.tools.runtime`（消费被包装后的调用结果） |
 | `timeout` 超时 / 取消 | `capabilities.timeout.definition`（`DEFAULT_TOOL_TIMEOUT` 与超时调用语义） | `capabilities.timeout.provider`（`ToolTimeoutPlugin`：**本次工具调用期间把 `process` 服务包成登记册**，超时 / 取消即终止本次起的受管范围、确认静止后返回 `timed_out` / `cancelled`；`cancel()` 以 `ctx.get("abort")` 暴露，同时登记**本轮取消**；`TurnCancelPlugin`：消费本轮取消——`tools/guard` 拒绝新工具调用（在审批之前）、`agent/post-tool` 以取消收尾、llm seam 把纯文本回复换成取消说明。取消源（信号装配）仍由装配层接：`app.cli.InterruptSource` 把回合执行期间的 Ctrl-C 换成一次 `cancel()`） | `miniharness.tools.runtime`（把中止结局规范化成结构化结果）、`capabilities.retry.provider`（按结局码决定是否重试）、`app.cli.InterruptSource`（信号装配）、`miniharness.process.contract`（终止动词） |
 | `validation` 输出校验 | `capabilities.validation.definition`（`sanitize_output` / `validate_output` 的注入检测与 schema 校验） | `capabilities.validation.provider`（`ValidationPlugin`） | `miniharness.tools.runtime`（消费被改写后的权威结果） |
@@ -42,5 +42,5 @@
 `capabilities/<能力>/provider/test_*.py`。它们只装「实现 + 一个工具流水线」，
 并逐字对照契约包的语义（例如
 `capabilities/retry/provider/test_retry.py` 同时跑 `with_retry` 与 `RetryPlugin`；
-`capabilities/persistence/definition/test_log_format.py` 逐字读回日志文件与迁移链）。
+`capabilities/persistence/provider/test_log_format.py` 逐字读回日志文件与迁移链）。
 跨包集成（装配整个 Loop）集中在 [`tests/`](../tests/README.md)。

@@ -14,13 +14,8 @@ import pytest
 
 from capabilities.final_output.provider import FinalOutputPlugin
 from capabilities.permission.provider import PermissionPlugin
-from capabilities.persistence.definition import (
-    LOG_FORMAT,
-    LOG_VERSION,
-    PersistenceManager,
-    Store,
-)
-from capabilities.persistence.provider import PersistenceConsumer
+from capabilities.persistence.definition import LOG_FORMAT, LOG_VERSION
+from capabilities.persistence.provider import PersistenceConsumer, PersistenceManager, Store
 from capabilities.timeout.provider import ToolTimeoutPlugin
 from capabilities.tracing.provider import TraceConsumer
 from miniharness.loop import (

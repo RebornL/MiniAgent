@@ -1,8 +1,8 @@
 """persistence —— 会话持久化能力。
 
-- 契约：`definition`（`Store` / `PersistenceManager`：事件日志的物理形态、格式版本与迁移链）；
-- 实现：`provider`（`PersistenceConsumer`：有界写后缓冲 + `flush()` 屏障 + 三个语义检查点，
-  事件成批落盘，`flush()` 返回才构成崩溃承诺）；
+- 契约：`definition`（事件日志的物理形态与格式版本：`LOG_FORMAT` / `LOG_VERSION` / `LEGACY_LOG_VERSION` / `log_filename`）；
+- 实现：`provider`（`Store` / `PersistenceManager`：目录布局、追加写与迁移链；`PersistenceConsumer`：有界写后
+  缓冲 + `flush()` 屏障 + 三个语义检查点，事件成批落盘，`flush()` 返回才构成崩溃承诺）；
 - 消费方：`app.assembly` / `app.cli`（重放日志恢复会话、列出历史）；
 - 派发方：`miniharness.loop`——在「每步开始前 / 模型请求前 / 工具派发前」**派发
   `agent/checkpoint` seam 事件**，不 import 本能力的任何契约（检查点由本能力订阅）。

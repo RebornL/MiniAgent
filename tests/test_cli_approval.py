@@ -19,7 +19,7 @@ from pathlib import Path
 from app import assembly
 from app.assembly import build_harness
 from app.cli import APPROVAL_SCOPE, cli_approver, install_approver
-from capabilities.persistence.definition import PersistenceManager, Store
+from capabilities.persistence.provider import PersistenceManager, Store
 from capabilities.shell.definition import RUN_COMMAND_NAME
 from miniharness.core import Context
 from miniharness.loop import Loop

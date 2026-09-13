@@ -150,7 +150,7 @@ class Session:
         """`derive_messages` 的逆：把模型可见的 messages 还原成事件日志。
 
         只用于把 v0 的历史格式（`messages.json` 的消息数组）翻译成事件日志，
-        见 `capabilities.persistence.definition.translate`：
+        见 `capabilities.persistence.provider.translate`：
         `session_from_messages(msgs).derive_messages() == msgs`。
         """
         session = cls()
