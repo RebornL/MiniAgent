@@ -10,6 +10,7 @@ from __future__ import annotations
 from miniharness.core import Context, Plugin
 from miniharness.llm.contract import LLM
 from miniharness.session import Session
+from miniharness.tools.contract import DENIED
 from miniharness.tools.runtime import ToolRuntime
 
 __all__ = ["Loop"]
@@ -20,6 +21,9 @@ class Loop(Plugin):
 
     每个工具结果入日志后派发 `agent/post-tool`（waterfall，默认 `{"continue": True}`）；
     监听者返回 `{"continue": False, "answer": ...}` 即以该 answer 收尾本轮。
+
+    中止结局与成功同走 `tool/result`（`status` 带稳定的结局码 `timed_out` / `cancelled` / `failed`）；
+    只有 `denied` 另落 `tool/denied`——工具体没执行，没有权威结果，也不派发 `agent/post-tool`。
 
     循环体内没有任何权限、超时、重试、压缩判断——它们都是 `ctx.on(...)` 订阅者。
     """
@@ -63,12 +67,12 @@ class Loop(Plugin):
             denial: str | None = None
             for call in calls:
                 result = tools.run(call)                      # 只依赖 tools seam
-                if result["status"] == "denied":
-                    # 没有权威结果 → 不写 tool/result，但仍需落配对事件并继续本批
+                if result["status"] == DENIED:
+                    # 被拒 → 工具体没执行、没有权威结果：不写 tool/result，但仍需落配对事件
                     session.append("tool/denied", name=result["name"],
-                                   call_id=call.get("id", ""), reason=result["reason"])
+                                   call_id=call.get("id", ""), reason=result["error"])
                     if denial is None:
-                        denial = result["reason"]
+                        denial = result["error"]
                     continue
                 session.append("tool/result", name=result["name"], call_id=call.get("id", ""),
                                args=call.get("args") or {},

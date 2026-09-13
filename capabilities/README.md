@@ -22,13 +22,13 @@
 
 | 能力 | Definition（契约包） | Provider（实现包） | Consumer（消费方包） |
 | --- | --- | --- | --- |
-| `compaction` 压缩 | `capabilities.compaction.definition`（`CompactionConfig` / `ContextManager` / `to_text`） | `capabilities.compaction.provider`（`CompactionPlugin`、`stub_summarizer`） | `capabilities.persistence.provider`（落盘时读当前摘要）、`app.assembly`（恢复摘要） |
+| `compaction` 压缩 | `capabilities.compaction.definition`（`CompactionConfig` / `ContextManager` / `to_text` / `compaction_summaries`） | `capabilities.compaction.provider`（`CompactionPlugin`、`stub_summarizer`） | `miniharness.session`（把压缩事件投影成 surface 替换）、`app.assembly`（重放日志恢复摘要链） |
 | `persistence` 持久化 | `capabilities.persistence.definition`（`Store` / `PersistenceManager` / 事件日志的格式版本与迁移链） | `capabilities.persistence.provider`（`PersistenceConsumer`，订阅 Session 日志落盘，`flush()` 是崩溃承诺的屏障） | `app.assembly`、`app.cli`（重放日志恢复会话、列出历史） |
-| `retry` 重试 | `capabilities.retry.definition`（`is_retryable` / `with_retry`） | `capabilities.retry.provider`（`RetryPlugin`） | `miniharness.tools.runtime`（消费被包装后的调用结果） |
-| `timeout` 超时 | `capabilities.timeout.definition`（`DEFAULT_TOOL_TIMEOUT` 与超时调用语义） | `capabilities.timeout.provider`（`ToolTimeout` / `ToolTimeoutPlugin`） | `miniharness.tools.runtime`（把超时收敛为结构化 error） |
+| `retry` 重试 | `capabilities.retry.definition`（`is_retryable` / `is_retryable_outcome` / `with_retry`） | `capabilities.retry.provider`（`RetryPlugin`） | `miniharness.tools.runtime`（消费被包装后的调用结果） |
+| `timeout` 超时 | `capabilities.timeout.definition`（`DEFAULT_TOOL_TIMEOUT` 与超时调用语义） | `capabilities.timeout.provider`（`ToolTimeoutPlugin`） | `miniharness.tools.runtime`（把超时结局规范化成结构化结果）、`capabilities.retry.provider`（按结局码决定是否重试） |
 | `validation` 输出校验 | `capabilities.validation.definition`（`sanitize_output` / `validate_output` 的注入检测与 schema 校验） | `capabilities.validation.provider`（`ValidationPlugin`） | `miniharness.tools.runtime`（消费被改写后的权威结果） |
 | `tracing` 追踪 | `capabilities.tracing.definition`（`Span` / `AgentTracer`） | `capabilities.tracing.provider`（`TraceConsumer`） | `capabilities.persistence.provider`（把 span 一并落盘） |
-| `skills` 技能 | `capabilities.skills.definition`（`Skill` / `SkillManager`） | `capabilities.skills.provider`（`SkillRegistry`） | `capabilities.skills.consumer`（`SystemPromptPlugin`）、`app.assembly`（恢复已激活技能） |
+| `skills` 技能 | `capabilities.skills.definition`（`Skill` / `SkillManager` / `active_skills` + `skill/*` 事件词汇） | `capabilities.skills.provider`（`SkillRegistry`） | `capabilities.skills.consumer`（`SystemPromptPlugin`）、`app.assembly`（重放 `skill/*` 事件恢复技能状态） |
 | `permission` 审批 | `miniharness.tools.runtime` 的 `tools/pre-execute` 决策词汇（`allow` / `ask` / `deny`） | `capabilities.permission.provider`（`PermissionPlugin`） | `miniharness.tools.runtime`（按决策决定是否执行工具体） |
 | `final_output` 终结 | `miniharness.loop` 的 `agent/post-tool` 收尾协议 | `capabilities.final_output.provider`（`FinalOutputPlugin`） | `miniharness.loop`（按收尾协议结束本轮） |
 

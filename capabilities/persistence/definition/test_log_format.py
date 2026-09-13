@@ -2,6 +2,7 @@
 
 只依赖本包与更下层（`miniharness.session`）：日志逐行可读、首行 header 带格式版本、
 写入只发布当代版本；v0 的 `messages.json` 经相邻版本迁移链翻译成当代事件日志；
+旧代际写在 `meta.json` 里的旁路状态在翻译期折进日志（日志已能自明时不再折）；
 写路径校验既有代际（更高版本拒绝写入）、也修复首个 flush 崩溃留下的半份日志。
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ from capabilities.persistence.definition import (
     LEGACY_MESSAGES_FILE,
     LOG_FORMAT,
     LOG_VERSION,
+    META_FILE,
     PersistenceManager,
     Store,
 )
@@ -109,6 +111,89 @@ def test_a_flush_that_died_before_the_header_is_treated_as_never_written(tmp_pat
         header = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
         assert header["format"] == LOG_FORMAT
         assert header["version"] == LOG_VERSION
+
+
+def test_legacy_bypass_state_is_folded_into_the_translated_log(tmp_path):
+    """旧代际的旁路（`meta.json` 的 `active_skills` / `summary`）在**翻译期**折进日志。
+
+    旧日志里既没有 `skill/*` 事件、也没有 `context/compacted` 事件，装载状态与摘要链
+    只在旁路里；折进来后它们才是可重放的——运行时不读旁路（日志是唯一权威源，ADR-0001）。
+    """
+    _write_v1_log(tmp_path, "old", [
+        {"seq": 1, "type": "user/message", "content": "第一问"},
+        {"seq": 2, "type": "assistant/message", "content": "第一答"},
+    ])
+    store = Store(str(tmp_path))
+    store.save("old", META_FILE, {"active_skills": ["math"], "summary": "第一份摘要"})
+
+    events = store.load_log("old")
+
+    assert events[2:] == [                                   # 折进来的事件接着日志的 seq
+        {"seq": 3, "type": "skill/loaded", "name": "math"},
+        {"seq": 4, "type": "context/compacted", "summary": "第一份摘要",
+         "shadowed_seqs": [], "shadowed_range": None, "replacement": []},
+    ]
+    # 「仅用于保留」的压缩事件不遮蔽任何事件、也不注入替换内容：投影逐字不变
+    assert Session(events=events).derive_messages() == [
+        {"role": "user", "content": "第一问"},
+        {"role": "assistant", "content": "第一答"},
+    ]
+
+
+def test_a_log_that_speaks_for_itself_is_never_overridden_by_the_legacy_meta(tmp_path):
+    """日志已能表达状态时不再折叠旁路：过时的 meta 不许盖在日志上（那又是两份真相源）。"""
+    _write_v1_log(tmp_path, "old", [
+        {"seq": 1, "type": "user/message", "content": "第一问"},
+        {"seq": 2, "type": "skill/loaded", "name": "math"},
+        {"seq": 3, "type": "context/compacted", "summary": "日志里的摘要", "replaced_seqs": [1]},
+    ])
+    Store(str(tmp_path)).save("old", META_FILE, {
+        "active_skills": ["math", "calc"], "summary": "旁路里的摘要"})
+
+    events = Store(str(tmp_path)).load_log("old")
+
+    assert events == [                                       # 只有 v1 → v2 的迁移，旁路一个字没进来
+        {"seq": 1, "type": "user/message", "content": "第一问"},
+        {"seq": 2, "type": "skill/loaded", "name": "math"},
+        {"seq": 3, "type": "context/compacted", "summary": "日志里的摘要",
+         "shadowed_seqs": [1], "shadowed_range": {"start": 1, "end": 1},
+         "replacement": [{"role": "user", "content": "[上下文已压缩] 日志里的摘要"}]},
+    ]
+
+
+def _write_v1_log(tmp_path, session_id: str, records: list[dict]) -> None:
+    """落一份 v1 代际日志（旧日志没有 `skill/*` / `context/compacted` 时的旁路才需要折叠）。"""
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+    (session_dir / "events.v1.jsonl").write_text(
+        json.dumps({"format": LOG_FORMAT, "version": 1, "session_id": session_id}) + "\n"
+        + "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8")
+
+
+def test_v1_compaction_events_are_translated_to_the_current_shape(tmp_path):
+    """v1 的压缩事件（`summary` + `replaced_seqs`）翻译成当代形态：遮蔽与替换语义不变。"""
+    _write_v1_log(tmp_path, "old", [
+        {"seq": 1, "type": "user/message", "content": "第一问"},
+        {"seq": 2, "type": "assistant/message", "content": "第一答"},
+        {"seq": 3, "type": "user/message", "content": "第二问"},
+        {"seq": 4, "type": "context/compacted", "summary": "第一份摘要",
+         "replaced_seqs": [1, 2]},
+    ])
+
+    events = PersistenceManager(Store(str(tmp_path))).load_events("old")
+
+    compacted = events[-1]
+    assert compacted["shadowed_seqs"] == [1, 2]             # 被遮蔽的事件范围
+    assert compacted["shadowed_range"] == {"start": 1, "end": 2}
+    assert compacted["replacement"] == [                    # 替换内容：按 v1 的渲染规则固化
+        {"role": "user", "content": "[上下文已压缩] 第一份摘要"}]
+    assert "replaced_seqs" not in compacted                 # 旧字段名不再出现
+    # 翻译后的投影与 v1 语义一致：被遮蔽事件留档，投影里只剩替换内容与未遮蔽事件
+    assert Session(events=events).derive_messages() == [
+        {"role": "user", "content": "[上下文已压缩] 第一份摘要"},
+        {"role": "user", "content": "第二问"},
+    ]
 
 
 def test_appending_refuses_to_write_below_a_newer_generation(tmp_path):

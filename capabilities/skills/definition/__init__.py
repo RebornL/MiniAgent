@@ -10,12 +10,37 @@ import shutil
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 import tiktoken
 
 if TYPE_CHECKING:
     from openai import OpenAI
+
+
+# ═══════════════════════════════════════════════════════════════
+# 技能事件词汇表：装载 / 卸载是日志里的一等事件（状态可重放）
+# ═══════════════════════════════════════════════════════════════
+LOADED_EVENT = "skill/loaded"
+UNLOADED_EVENT = "skill/unloaded"
+
+
+def active_skills(events: Iterable[dict]) -> list[str]:
+    """从事件日志投影技能状态：按序折叠装载/卸载事件（纯函数、可重放）。
+
+    状态只由日志决定，因此恢复不需要任何旁路元数据；返回排序后的名字，
+    与 `SkillManager` 的 `get_active_tools()` / `get_active_prompt()` 的稳定性一致。
+    """
+    active: list[str] = []
+    for event in events:
+        name = event.get("name")
+        kind = event.get("type")
+        if kind == LOADED_EVENT and name not in active:
+            active.append(name)
+        elif kind == UNLOADED_EVENT and name in active:
+            active.remove(name)
+    return sorted(active)
+
 
 @dataclass
 class Skill:

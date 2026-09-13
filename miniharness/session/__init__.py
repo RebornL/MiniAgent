@@ -2,7 +2,7 @@
 
 `Session` 是 append-only 的 typed 事件日志：`append()` 只增不改，`derive_messages()` 是
 「模型可见历史」的投影，`replay()` 用已落盘的日志重放恢复，`session_from_messages()` 把
-v0 的消息数组翻译成事件，`compact()` 做 surface 替换。
+v0 的消息数组翻译成事件，`compact()` 把一次压缩写成可重放的 surface 替换记录。
 
 本包不含任何执行逻辑，是能力契约里最稳定的一层。
 """
@@ -11,7 +11,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-__all__ = ["Session"]
+__all__ = ["Session", "COMPACTED_EVENT", "compaction_replacement"]
+
+#: 压缩事件：被遮蔽的事件仍留在日志里，投影时以 `replacement` 代之。
+COMPACTED_EVENT = "context/compacted"
+
+
+def compaction_replacement(summary: str) -> list[dict]:
+    """压缩事件的标准替换内容：把摘要渲染成一条模型可见的 user 消息。"""
+    return [{"role": "user", "content": f"[上下文已压缩] {summary}"}]
 
 
 @dataclass
@@ -50,10 +58,23 @@ class Session:
 
         return dispose
 
-    def compact(self, summary: str, replaced_seqs: Iterable[int]) -> dict:
-        """压缩 = surface 替换：被替换的原始事件留在日志里，投影时以摘要代之。"""
-        return self.append("context/compacted", summary=summary,
-                           replaced_seqs=sorted(set(replaced_seqs)))
+    def compact(self, summary: str, shadowed_seqs: Iterable[int],
+                replacement: Iterable[dict] | None = None) -> dict:
+        """压缩 = surface 替换：被遮蔽的原始事件留在日志里，投影时以替换内容代之。
+
+        事件记录**被遮蔽的事件范围**（`shadowed_seqs` + `shadowed_range`）与**替换内容**
+        （`replacement`，模型可见消息），外加摘要本体（`summary`，下一次压缩的增量输入）。
+        因此压缩后的历史可以只靠这条事件确定性地重建。
+        """
+        seqs = sorted(set(shadowed_seqs))
+        return self.append(
+            COMPACTED_EVENT,
+            summary=summary,
+            shadowed_seqs=seqs,
+            shadowed_range={"start": seqs[0], "end": seqs[-1]} if seqs else None,
+            replacement=[dict(message) for message in (
+                replacement if replacement is not None else compaction_replacement(summary))],
+        )
 
     def derive_messages(self) -> list[dict]:
         """把日志投影成模型可见的 messages（确定且幂等）。"""
@@ -62,17 +83,22 @@ class Session:
     def derive_entries(self) -> list[tuple[dict, dict]]:
         """带来源的投影：`(日志事件, 模型可见消息)` 对。
 
+        压缩事件记录的 `shadowed_seqs` 决定遮蔽范围，`replacement` 决定该处投影出什么；
+        被更晚的压缩重新遮蔽的旧替换内容不再投影（否则历次摘要会层层堆在投影里）。
         策略（如压缩）可据此定位要 surface 替换的 `seq`，而不用重新实现投影逻辑。
         """
+        compactions = [event for event in self.events if event["type"] == COMPACTED_EVENT]
         masked: set[int] = set()
-        anchors: dict[int, list[str]] = {}
-        for event in self.events:
-            if event["type"] != "context/compacted":
+        replacements: dict[int, list[dict]] = {}
+        # 逆序扫：`masked` 此时恰是「更晚的压缩」遮蔽过的 seq，据此判旧替换内容是否被取代
+        for event in reversed(compactions):
+            seqs = event.get("shadowed_seqs") or []
+            if not seqs:
                 continue
-            seqs = event.get("replaced_seqs") or []
+            anchor = min(seqs)
+            if anchor not in masked:
+                replacements[anchor] = list(event.get("replacement") or [])
             masked.update(seqs)
-            if seqs:
-                anchors.setdefault(min(seqs), []).append(event["summary"])
 
         # system prompt 是「状态」而非「历史」：多条 system/message 只投影最后一条，且恒置最前。
         # legacy 每步覆写 messages[0]；把 system 留在原位置会产生中位 system 消息，
@@ -86,9 +112,9 @@ class Session:
         if latest_system is not None:
             entries.append(latest_system)
         for event in self.events:
-            for summary in anchors.get(event["seq"], ()):
-                # 摘要落在被替换区间的起始位置（日志尾部 append，投影时归位）
-                entries.append((event, {"role": "user", "content": f"[上下文已压缩] {summary}"}))
+            for message in replacements.get(event["seq"], ()):
+                # 替换内容落在被遮蔽区间的起始位置（日志尾部 append，投影时归位）
+                entries.append((event, message))
             if event["seq"] in masked:
                 continue
             kind = event["type"]

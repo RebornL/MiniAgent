@@ -1,10 +1,22 @@
 """
-重试模块 —— 只对瞬时故障重试，不重试业务错误
+重试模块 —— 只对瞬时故障与可重试的中止结局重试，不重试业务错误
 """
 import time
 from typing import TypeVar, Callable
 
+from miniharness.tools.contract import FAILED, TIMED_OUT
+
 T = TypeVar("T")
+
+#: 可按结局码重试的中止结局：超时与失败可重试；被拒（策略否决）与被取消（上层意图）不可
+#: ——重试一个取消会撤销用户刚刚表达的意图。
+RETRYABLE_OUTCOMES = frozenset({TIMED_OUT, FAILED})
+
+
+def is_retryable_outcome(code: str) -> bool:
+    """按中止结局码决定是否重试（只认码，不猜异常类型）。"""
+    return code in RETRYABLE_OUTCOMES
+
 
 # 哪些 HTTP 状态码值得重试
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
@@ -49,6 +61,7 @@ def with_retry(
     base_delay: float = 1.0,
     max_delay: float = 30.0,
     label: str = "",
+    retry_value: Callable[[T], bool] | None = None,
 ) -> T:
     """
     带指数退避的重试包装器。
@@ -59,18 +72,21 @@ def with_retry(
         base_delay:  初始退避秒数
         max_delay:   最大退避秒数
         label:       日志标签
+        retry_value: 可选的值通道判定：`fn` 正常返回的值若被它判为可重试，则同样退避重试
+                     （工具中止结局走这条，例如 `timed_out`）；耗尽后返回最后一个值。
+                     默认 `None`：值一概不重试（legacy 行为）。
 
     返回:
-        fn 的返回值
+        fn 的返回值（或耗尽重试后的最后一个值）
 
     抛出:
-        最后一次重试仍然失败则抛出原异常
+        最后一次重试仍然失败则抛出原异常；不可重试的异常第一次就抛
     """
     last_error: Exception | None = None
 
     for attempt in range(max_retries + 1):
         try:
-            return fn()
+            result = fn()
         except Exception as e:
             last_error = e
 
@@ -79,10 +95,15 @@ def with_retry(
 
             if attempt == max_retries:
                 break  # 重试耗尽
+            retried = e
+        else:
+            if retry_value is None or attempt == max_retries or not retry_value(result):
+                return result
+            retried = result
 
-            delay = min(base_delay * (2 ** attempt), max_delay)
-            label_prefix = f"[{label}] " if label else ""
-            print(f"{label_prefix}⚠️ 第 {attempt + 1}/{max_retries} 次重试，{delay:.1f}s 后重试: {e}")
-            time.sleep(delay)
+        delay = min(base_delay * (2 ** attempt), max_delay)
+        label_prefix = f"[{label}] " if label else ""
+        print(f"{label_prefix}⚠️ 第 {attempt + 1}/{max_retries} 次重试，{delay:.1f}s 后重试: {retried}")
+        time.sleep(delay)
 
     raise last_error  # 重试耗尽

@@ -9,7 +9,7 @@ import pytest
 
 from capabilities.validation.definition import sanitize_output, validate_output
 from capabilities.validation.provider import ValidationPlugin
-from miniharness.tools.contract import ToolDefinition
+from miniharness.tools.contract import FAILED, ToolDefinition
 from miniharness.tools.runtime.test_pipeline import _pipeline
 
 
@@ -22,7 +22,7 @@ def test_validation_plugin_reuses_structure_semantics():
         sanitize_output(dirty)
     _, runtime = _pipeline(ValidationPlugin(), ToolDefinition("dirty", "", {}, lambda a: dict(dirty)))
     result = runtime.run({"id": "c1", "name": "dirty", "args": {}})
-    assert result["status"] == "error" and str(exc.value) in result["content"]
+    assert result["status"] == FAILED and str(exc.value) in result["content"]
 
     # schema 不符：与 validate_output 抛出的消息一致
     bad = {"n": "not-an-int"}
@@ -31,7 +31,7 @@ def test_validation_plugin_reuses_structure_semantics():
     _, runtime = _pipeline(ValidationPlugin({"count": schema}),
                            ToolDefinition("count", "", {}, lambda a: dict(bad)))
     result = runtime.run({"id": "c2", "name": "count", "args": {}})
-    assert result["status"] == "error" and str(exc.value) in result["content"]
+    assert result["status"] == FAILED and str(exc.value) in result["content"]
 
     # 合法输出：装了校验插件与没装，结果完全相同
     clean = {"n": 3}

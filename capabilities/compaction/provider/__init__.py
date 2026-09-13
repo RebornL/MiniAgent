@@ -1,14 +1,22 @@
 """compaction.provider —— 压缩策略的实现（Provider）。
 
-`CompactionPlugin` 订阅 `agent/pre-step`：超阈值时把「被替换的事件区间 + 摘要」写成一条
-`context/compacted` 事件（surface 替换）；阈值、切分点与增量摘要语义全部复用契约包
+`CompactionPlugin` 订阅 `agent/pre-step`：超阈值时把「被遮蔽的事件范围 + 替换内容 + 摘要」
+写成一条 `context/compacted` 事件（surface 替换）；阈值、切分点与增量摘要语义全部复用契约包
 `capabilities.compaction.definition`。摘要函数可注入，默认 `stub_summarizer`（确定性，不调 LLM）。
+
+压缩状态本身（增量摘要链）只由日志重建：`restore(events)` 折叠日志里的压缩事件，
+不读任何旁路元数据——重启后接着压缩时，`existing` 就是日志里最后一次压缩的摘要。
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
-from capabilities.compaction.definition import CompactionConfig, ContextManager, to_text
+from capabilities.compaction.definition import (
+    CompactionConfig,
+    ContextManager,
+    compaction_summaries,
+    to_text,
+)
 from miniharness.core import Context, Plugin
 from miniharness.session import Session
 
@@ -52,13 +60,12 @@ class CompactionPlugin(Plugin):
 
     def apply(self, ctx: Context) -> None:
         self._session: Session = ctx.get("session")
-        ctx.provide("compaction", self)      # 供持久化消费者读取当前摘要
+        ctx.provide("compaction", self)      # 装配层按名字取用它做重放（restore）
         ctx.on("agent/pre-step", self._pre)
 
-    @property
-    def summary(self) -> str:
-        """当前增量摘要（`Persistence.save_session` 恢复/保存时需要）。"""
-        return self.context.summary
+    def restore(self, events: Iterable[dict]) -> None:
+        """从事件日志重放压缩状态：摘要链只由日志里的压缩事件重建，不读旁路元数据。"""
+        self.context.restore(compaction_summaries(events))
 
     def _pre(self, payload: dict, next_: Callable[[], Any]) -> dict:
         self.compact_if_needed()

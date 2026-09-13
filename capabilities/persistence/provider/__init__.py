@@ -21,8 +21,8 @@ __all__ = ["PersistenceConsumer"]
 class PersistenceConsumer(Plugin):
     """把 Session 日志喂给 `PersistenceManager`（日志本身落盘，投影不落盘）。
 
-    沿用 legacy 的频率语义：模型可见内容变化的事件与回合结束各冲刷一次；
-    `summary` 与 `active_skills` 经 `ctx.get("compaction")` / `ctx.get("skills")` 现取，缺失则用空值。
+    只订阅 `session`：摘要与技能状态都是日志里的事件，随日志一起落盘，
+    因此这里不再从 `ctx.get("compaction")` / `ctx.get("skills")` 现取任何旁路状态。
     """
 
     inject = ("session",)
@@ -36,7 +36,6 @@ class PersistenceConsumer(Plugin):
         self.saves = 0
         self._ctx: Context | None = None
         self._session: Session | None = None
-        self._last_input = ""
 
     def apply(self, ctx: Context) -> None:
         self._ctx = ctx
@@ -49,24 +48,16 @@ class PersistenceConsumer(Plugin):
 
         未屏障的事件只活在内存里——崩溃即丢。屏障是幂等的：没有新事件时不追加事件记录。
         """
-        compaction = self._ctx.get("compaction") if self._ctx else None
-        skills = self._ctx.get("skills") if self._ctx else None
         trace = self._ctx.get("trace") if self._ctx else None
         written = self.manager.save_session(
             self.session_id,
             self._session.events,
-            compaction.summary if compaction is not None else "",
             trace.tracer.to_dicts() if trace is not None else [],
-            skills.active_names() if skills is not None else [],
-            self._last_input,
         )
         self.saves += 1
         return written
 
     def _on_event(self, event: dict) -> None:
-        if event["type"] == "user/message":
-            self._last_input = event.get("content", "")
-            return
         if event["type"] not in self.FLUSH_ON or self._session is None:
             return
         self.flush()

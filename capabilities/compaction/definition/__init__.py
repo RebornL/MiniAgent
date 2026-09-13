@@ -9,12 +9,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 import tiktoken
 
+from miniharness.session import COMPACTED_EVENT
+
 if TYPE_CHECKING:
     from openai import OpenAI
+
+
+def compaction_summaries(events: Iterable[dict]) -> list[str]:
+    """从事件日志投影压缩状态：每次压缩的摘要本体，按发生顺序（纯函数、可重放）。
+
+    压缩事件的 `replacement` 是模型可见的替换内容，`summary` 是摘要本体；
+    后者是下一次增量压缩的输入，故恢复时必须从日志重建它。
+    """
+    return [event.get("summary", "") for event in events
+            if event.get("type") == COMPACTED_EVENT]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -73,9 +85,10 @@ class ContextManager:
         self.summary: str = ""
         self.total_compactions: int = 0
 
-    def restore(self, summary: str) -> None:
-        """从持久化恢复摘要"""
-        self.summary = summary
+    def restore(self, summaries: list[str]) -> None:
+        """从事件日志重放恢复压缩状态（摘要链：末项是当前增量摘要，条数是累计压缩次数）。"""
+        self.summary = summaries[-1] if summaries else ""
+        self.total_compactions = len(summaries)
 
     # ── 策略 1：精确 token 计数 ─────────────────────
     def count_tokens(self, messages: list[dict]) -> int:

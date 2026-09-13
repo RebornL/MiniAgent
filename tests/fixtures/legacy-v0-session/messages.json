@@ -1,0 +1,94 @@
+[
+  {
+    "role": "system",
+    "content": "你是一个有用的助手。你可以使用 load_skill 加载需要的技能模块，用 unload_skill 释放不再需要的模块。遇到不确定的事实时，请先加载对应技能再操作，不要猜测。\n\n\n--- 当前激活的技能 ---\n# calculator\n你拥有计算能力。遇到数学计算请调用 calculate 工具，不要心算。\n\n# web-search\n你拥有搜索能力。遇到不确定的事实性问题，请先搜索再回答，不要猜测。"
+  },
+  {
+    "role": "user",
+    "content": "帮我查一下示例问题甲"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_0000000000000000000000a1",
+        "type": "function",
+        "function": {
+          "name": "load_skill",
+          "arguments": "{\"name\": \"web-search\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "✅ 已加载技能 'web-search'（互联网搜索能力）"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_0000000000000000000000a2",
+        "type": "function",
+        "function": {
+          "name": "search_web",
+          "arguments": "{\"query\": \"示例问题甲\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "未找到'示例问题甲'的相关结果"
+  },
+  {
+    "role": "assistant",
+    "content": "搜索没有返回结果，我无法确认这个问题。"
+  },
+  {
+    "role": "user",
+    "content": "那帮我算个加法"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_0000000000000000000000a3",
+        "type": "function",
+        "function": {
+          "name": "load_skill",
+          "arguments": "{\"name\": \"calculator\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "✅ 已加载技能 'calculator'（数学计算能力）"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_0000000000000000000000a4",
+        "type": "function",
+        "function": {
+          "name": "calculate",
+          "arguments": "{\"expression\": \"1+2\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "3"
+  },
+  {
+    "role": "assistant",
+    "content": "1 + 2 = **3**"
+  }
+]

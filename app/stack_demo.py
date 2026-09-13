@@ -73,7 +73,7 @@ def _demo() -> None:
 
     print("turn ->", ctx.get("loop").turn("把 21 翻倍"))
     print("log   ->", [(e["seq"], e["type"]) for e in session.events])
-    print("compact->", [(e["replaced_seqs"], e["summary"]) for e in session.events
+    print("compact->", [(e["shadowed_range"], e["summary"]) for e in session.events
                         if e["type"] == "context/compacted"],
           f"（摘要输入 {len(summarize_calls)} 次）")
     print("traces->", [(s.type, s.output if s.type == "tool_call" else "…")

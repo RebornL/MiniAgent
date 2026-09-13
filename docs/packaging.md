@@ -73,8 +73,9 @@ flowchart TB
 - **契约不反向依赖实现**：`capabilities/<能力>/definition/` 不 import 同能力的 `provider`；
   `miniharness.tools.contract` 不 import `miniharness.tools.runtime`。
 - **能力之间**：可以依赖对方的**契约**，不要依赖对方的实现。确有实现级协同时，
-  由 `app/` 装配处接线（例如压缩摘要的落盘由 `app.assembly` 把 `PersistenceConsumer`
-  和 `CompactionPlugin` 装在一起，而不是让两个 provider 互相 import）。
+  由 `app/` 装配处接线（例如终结工具名由 `app.assembly` 注入 `FinalOutputPlugin`、
+  恢复时由它把同一份日志喂给 `CompactionPlugin.restore` / `SkillRegistry.restore`，
+  而不是让持久化 provider 去 import 压缩与技能的实现）。
 - **tests** 可以依赖所有族；包内测试只依赖本包与更下层（跨层的断言属于 `tests/`）。
 
 同族内部 import 一律用**绝对包路径**（`from miniharness.session import Session`），

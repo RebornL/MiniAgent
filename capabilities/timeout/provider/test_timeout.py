@@ -1,7 +1,7 @@
 """包内测试：超时护栏的实现（`timeout.provider`）。
 
-超时必须以结构化 error 返回、与成功可区分；且卡死的工具体不得拖住进程退出
-（工具体跑在 daemon 线程里，子进程验证）。
+超时必须以稳定的 `timed_out` 结局返回、与成功和其它中止结局可区分；且卡死的工具体不得
+拖住进程退出（工具体跑在 daemon 线程里，子进程验证）。
 """
 from __future__ import annotations
 
@@ -11,13 +11,12 @@ import time
 from pathlib import Path
 
 from capabilities.timeout.provider import ToolTimeoutPlugin
-from miniharness.tools.contract import ToolDefinition
+from miniharness.tools.contract import OK, TIMED_OUT, ToolDefinition
 from miniharness.tools.runtime.test_pipeline import _pipeline
 
 
-
-def test_timeout_plugin_reports_timeout_as_error():
-    """用户裁定的 Story 15 例外：超时不报 ok，必须与成功可区分。"""
+def test_timeout_plugin_reports_timed_out_outcome():
+    """用户裁定的 Story 15 例外：超时不报 ok；T5 起也不再混同于 `failed`，而是 `timed_out`。"""
     def slow(args: dict) -> str:
         time.sleep(0.2)
         return "慢"
@@ -26,14 +25,14 @@ def test_timeout_plugin_reports_timeout_as_error():
                            ToolDefinition("slow", "", {}, slow, timeout_ms=50))
     result = runtime.run({"id": "c1", "name": "slow", "args": {}})
 
-    assert result["status"] == "error"
+    assert result["status"] == TIMED_OUT
     assert "超时" in result["error"] and result["content"] == result["error"]
 
     # 未超时的调用不受影响，仍是 ok
     _, ok_runtime = _pipeline(ToolTimeoutPlugin(default_ms=1000),
                               ToolDefinition("fast", "", {}, lambda a: "快", timeout_ms=1000))
     ok = ok_runtime.run({"id": "c2", "name": "fast", "args": {}})
-    assert ok["status"] == "ok" and ok["content"] == "快"
+    assert ok["status"] == OK and ok["content"] == "快"
 
 
 def test_timeout_does_not_block_process_exit():
@@ -58,7 +57,7 @@ def test_timeout_does_not_block_process_exit():
         'rt.register(ToolDefinition("hang", "", {}, lambda a: time.sleep(30)))\n'
         "t0 = time.time()\n"
         'r = rt.run({"id": "c1", "name": "hang", "args": {}})\n'
-        'assert r["status"] == "error", r\n'
+        'assert r["status"] == "timed_out", r\n'
         'assert time.time() - t0 < 5, "超时后应立即返回，不等工具体跑完"\n'
         'print("timeout-ok")\n'
     )

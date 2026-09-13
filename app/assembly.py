@@ -1,7 +1,8 @@
 """app.assembly —— 装配：把骨架、能力与后端装成 harness。
 
 `build_harness()` 装配 Session + 工具 + LLM provider + 策略插件 + 日志消费者；
-`resume_session()` 在其上重放事件日志、还原 summary / active_skills 并续跑一轮。
+`resume_session()` 在其上重放事件日志——投影、压缩摘要与技能状态全部只由日志重建，
+磁盘上没有第二份模型可见状态。
 
 策略全挂在事件 seam 上（Loop 零改动）：压缩 → `agent/pre-step`，重试 / 超时 → `tools/execute`，
 输出校验 → `tools/post-execute`，终结工具 → `agent/post-tool`，持久化 / 追踪 → Session 日志订阅。
@@ -131,21 +132,20 @@ def _open_harness(
     base_system_prompt: str,
     llm: LLM | None = None,
 ) -> Loop:
-    """装配 harness 并接上持久化状态：先重放事件日志，再还原 summary / active_skills。"""
+    """装配 harness 并从事件日志重放会话状态。
+
+    重放是恢复的唯一来源：`Session.replay` 重建模型可见历史，
+    压缩摘要与技能状态分别由 `CompactionPlugin.restore` / `SkillRegistry.restore`
+    折叠同一份日志里的压缩事件与 `skill/*` 事件——不读任何旁路元数据。
+    """
     ctx, session, loop = build_harness(model=model, session_id=session_id,
                                        store_dir=store_dir, client=client, llm=llm,
                                        base_system_prompt=base_system_prompt)
-    state = pm.load_session(session_id)
-    if state["events"]:
-        session.replay(state["events"])
-    if state["summary"]:
-        ctx.get("compaction").context.restore(state["summary"])
-    skills = ctx.get("skills")
-    for name in state["active_skills"]:
-        try:
-            skills.load(name)
-        except KeyError:      # 技能已不存在（改名/删除）→ 跳过，不影响恢复
-            pass
+    events = pm.load_events(session_id)
+    if events:
+        session.replay(events)
+        ctx.get("compaction").restore(events)
+        ctx.get("skills").restore(events)
     return loop
 
 
@@ -159,7 +159,7 @@ def resume_session(
     client: OpenAI | None = None,
     llm: LLM | None = None,
 ) -> str:
-    """恢复历史会话并继续对话：重放日志 + 还原 summary/active_skills 后跑一轮。"""
+    """恢复历史会话并继续对话：重放日志（投影 / 压缩摘要 / 技能状态）后跑一轮。"""
     pm = PersistenceManager(Store(store_dir))
     if not pm.load_events(session_id):
         return f"❌ 会话 {session_id} 不存在或为空"

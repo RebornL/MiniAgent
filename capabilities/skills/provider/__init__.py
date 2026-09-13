@@ -3,13 +3,23 @@
 `SkillRegistry` 把技能工具经 `ToolRuntime` 可逆注册（装载即挂、卸载即撤销），
 复用契约包 `capabilities.skills.definition` 的技能目录与激活记录，
 并暴露 legacy 的 `load_skill` / `unload_skill` 两个 meta 工具。
+
+装载/卸载同时写成 `skill/loaded` / `skill/unloaded` 事件：状态由日志决定，
+`restore(events)` 折叠这些事件重建激活集（含工具注册与领域提示），不读任何旁路元数据。
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
-from capabilities.skills.definition import Skill, SkillManager
+from capabilities.skills.definition import (
+    LOADED_EVENT,
+    UNLOADED_EVENT,
+    Skill,
+    SkillManager,
+    active_skills,
+)
 from miniharness.core import Context, Plugin
+from miniharness.session import Session
 from miniharness.tools.contract import ToolDefinition
 from miniharness.tools.runtime import ToolRuntime
 
@@ -24,9 +34,10 @@ class SkillRegistry(Plugin):
 
     复用 `SkillManager` 的技能目录/激活记录（`get_active_prompt` / `get_active_tools`
     语义不变），并暴露 legacy 的 `load_skill` / `unload_skill` 两个 meta 工具。
+    每次装载/卸载追加一条事件，因此技能状态是日志的函数，而不是进程内的旁路。
     """
 
-    inject = ("tools",)
+    inject = ("tools", "session")
 
     def __init__(self, manager: SkillManager | None = None) -> None:
         self.manager = manager or SkillManager()
@@ -36,6 +47,7 @@ class SkillRegistry(Plugin):
     def apply(self, ctx: Context) -> None:
         self._ctx = ctx
         self._tools: ToolRuntime = ctx.get("tools")
+        self._session: Session = ctx.get("session")
         ctx.provide("skills", self)
         ctx.effect(self.unload_all)          # 插件卸载时撤销全部已装载技能（可逆注册）
         # meta 工具随插件卸载一并撤销
@@ -57,10 +69,42 @@ class SkillRegistry(Plugin):
         self.manager.register(skill)
 
     def load(self, name: str) -> Callable[[], None]:
-        """装载技能：工具经 ToolRuntime 可逆注册；返回卸载 disposer（幂等）。"""
-        existing = self._active.get(name)
-        if existing is not None:
-            return existing
+        """装载技能：可逆注册 + 记一条 `skill/loaded`；返回**会记日志**的卸载 disposer（幂等）。
+
+        返回的口子走 `unload()`，因此「内存里撤下」与「日志里撤下」同步——否则调用者
+        用这个句柄卸载后，日志仍说装着，重启（日志是权威源）就会把卸载撤销。
+        是否真的装载过由 `_apply_load` 的返回值决定，重复装载不再写事件。
+        """
+        if self._apply_load(name) is not None:
+            self._session.append(LOADED_EVENT, name=name)
+        return lambda: self.unload(name)
+
+    def unload(self, name: str) -> bool:
+        """卸载技能：撤销注册 + 记一条 `skill/unloaded`；未装载则不动日志。"""
+        if not self._apply_unload(name):     # 是否真的撤下了由 `_apply_unload` 决定
+            return False
+        self._session.append(UNLOADED_EVENT, name=name)
+        return True
+
+    def restore(self, events: Iterable[dict]) -> None:
+        """从事件日志重放技能状态：折叠装载/卸载事件后重建工具注册与领域提示。
+
+        日志里出现而已不存在的技能名（改名/删除）直接跳过，不影响其余技能恢复。
+        """
+        self.unload_all()
+        for name in active_skills(events):
+            if name in self._skills:
+                self._apply_load(name)
+
+    # ── 应用/撤销（静默：不改日志，供重放与插件卸载使用；也是「是否真的动了」的唯一判据）──
+    def _apply_load(self, name: str) -> Callable[[], None] | None:
+        """装载：注册工具并返回撤销 disposer；已装载则返回 `None`（没有真的装载）。
+
+        不改日志——重放（`restore`）与插件卸载（`unload_all`）走这条路径；
+        `load()` 也用它判定该不该记一条 `skill/loaded`，判定只在这一处。
+        """
+        if name in self._active:
+            return None
         skill = self._skills.get(name)
         if skill is None:
             raise KeyError(f"技能 '{name}' 不存在。可用: {', '.join(self._skills)}")
@@ -89,7 +133,12 @@ class SkillRegistry(Plugin):
         self._active[name] = unload
         return self._ctx.effect(unload)
 
-    def unload(self, name: str) -> bool:
+    def _apply_unload(self, name: str) -> bool:
+        """卸载：撤下注册；返回「是否真的撤下了」（`unload()` 据此决定记不记事件）。
+
+        不改日志——重放与插件卸载也走这条路径；判定只在这一处，避免日志记下一次
+        并未真正发生的卸载。
+        """
         disposer = self._active.get(name)
         if disposer is None:
             return False
@@ -97,9 +146,9 @@ class SkillRegistry(Plugin):
         return True
 
     def unload_all(self) -> None:
-        """撤销全部已装载技能（插件卸载时逆序 unwind 的入口）。"""
+        """撤销全部已装载技能（插件卸载与重放前的清场入口；不改日志）。"""
         for name in list(self._active):
-            self.unload(name)
+            self._apply_unload(name)
 
     # ── legacy meta 工具形状：返回给模型的提示字符串 ──
     def load_skill(self, name: str) -> str:
@@ -118,7 +167,13 @@ class SkillRegistry(Plugin):
         return self.manager.get_active_tools()
 
     def active_names(self) -> list[str]:
-        """已激活技能名（供持久化恢复/保存会话时记录）。"""
+        """当前已激活的技能名（进程内视图；权威状态是日志里的 `skill/*` 事件）。
+
+        保留此读取口：它是 `load` / `unload` 的对偶——registry 自己的激活集视图，
+        不经过 legacy `SkillManager` 镜像（`get_active_tools` / `get_active_prompt`
+        读的是那份镜像）。因此它既是「这个 registry 现在认哪些技能」的天然读取口，
+        也是重放断言的观测面：技能状态只由日志折叠重建，断言必须能直接看这份状态。
+        """
         return sorted(self._active)
 
     def get_active_prompt(self) -> str:

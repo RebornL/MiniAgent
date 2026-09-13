@@ -215,8 +215,9 @@ def test_policy_plugin_changes_turn_outcome_without_changing_loop():
     assert plain_answer == "最终观察: 慢工具完成"
     (plain_result,) = [e for e in plain_log if e["type"] == "tool/result"]
     (timed_result,) = [e for e in timed_log if e["type"] == "tool/result"]
-    # 超时必须与成功可区分：权威结果是 error，而不是把超时伪装成 ok 的字符串
+    # 超时必须与成功可区分：权威结果带稳定的 `timed_out` 码，而不是把超时伪装成 ok 的字符串，
+    # 也不再与「工具抛异常」混同一个 `error`（T5：超时 / 取消 / 被拒 / 失败四者各有其码）
     assert plain_result["status"] == "ok"
-    assert timed_result["status"] == "error"
+    assert timed_result["status"] == "timed_out"
     assert "超时" in timed_result["content"]
     assert timed_answer != plain_answer

@@ -5,6 +5,9 @@
 
 权限 / 超时 / 重试 / 校验策略都不写在这里，而是订阅上述事件的插件（见 `capabilities/`）；
 本包只保证流水线顺序与「批内每个调用都有配对结果」。
+
+`tools/execute` 的 around 包装可以让出正常返回值，也可以**返回** `AbortOutcome`
+（超时 / 取消 / …）来短路——两种结局走同一条结果通道，本包把它们规范化成同构的结果 dict。
 """
 from __future__ import annotations
 
@@ -12,7 +15,13 @@ import json
 from typing import Any, Callable
 
 from miniharness.core import Context, Plugin
-from miniharness.tools.contract import ToolDefinition
+from miniharness.tools.contract import (
+    DENIED,
+    FAILED,
+    OK,
+    AbortOutcome,
+    ToolDefinition,
+)
 
 __all__ = ["ToolRuntime"]
 
@@ -27,8 +36,9 @@ class ToolRuntime(Plugin):
     `tools/pre-execute (allow|deny|ask)` → 单调 guard → `tools/execute`(around)
     → `tools/post-execute` → `finalize_content` → `tools/result`。
 
-    返回值：`{"status": "ok"|"error"|"denied", "name", "content", ...}`；
-    只有 `ok`/`error` 是**权威结果**（会派发 `tools/result`），`denied` 表示工具体未执行。
+    返回值：`{"status": "ok"|"timed_out"|"cancelled"|"denied"|"failed", "name", "content", ...}`；
+    成功带 `value`，中止结局带 `error`，两者同构、同走一条结果通道。只有 `denied` 表示
+    工具体**未执行**（无权威结果，不派发 `tools/result`），其余结局都会派发。
     """
 
     inject = ("session",)
@@ -71,23 +81,23 @@ class ToolRuntime(Plugin):
         payload = {"call": call, "tool": tool, "args": call.get("args") or {}}
         if tool is None:
             error = f"工具未注册: {name}"
-            result: dict = {"status": "error", "name": name, "error": error, "content": error}
+            result: dict = {"status": FAILED, "name": name, "error": error, "content": error}
         else:
             result = self._pipeline(payload, tool)
-            if result["status"] == "denied":
+            if result["status"] == DENIED:
                 return result
 
-        # 4) post-execute：观察或改写结果（错误结果同样可见）
+        # 4) post-execute：观察或改写结果（中止结果同样可见）
         result = self._ctx.waterfall("tools/post-execute", {**payload, "result": result},
                                      lambda p: p["result"])
         # 5) finalize_content：最后的 content 不变量
         result = self._finalize(tool, result)
-        # 6) tools/result：不可变权威结果（仅 ok/error 会走到这里）
+        # 6) tools/result：不可变权威结果（除 denied 外的结局都走到这里）
         self._ctx.emit("tools/result", {**payload, "result": result})
         return dict(result)
 
     def _pipeline(self, payload: dict, tool: ToolDefinition) -> dict:
-        """pre-execute → guard → execute，返回 ok/error/denied 结果。"""
+        """pre-execute → guard → execute，返回 ok / 四种中止结局之一。"""
         name = tool.name
         # 1) pre-execute：权限/审批/沙箱
         decision = self._ctx.waterfall("tools/pre-execute", payload, lambda p: {"kind": "allow"})
@@ -97,19 +107,22 @@ class ToolRuntime(Plugin):
         if kind == "ask":
             kind = self._approve(payload, decision)
         if kind == "deny":
-            return {"status": "denied", "name": name,
-                    "reason": decision.get("reason") or f"工具调用被拒绝: {name}"}
+            reason = decision.get("reason") or f"工具调用被拒绝: {name}"
+            return {"status": DENIED, "name": name, "error": reason, "content": reason}
 
-        # 3) execute：around 包装（超时/重试/计量挂这里）
+        # 3) execute：around 包装（超时/重试/计量挂这里）。策略可短路：**返回**
+        #    `AbortOutcome`（超时/取消/…）而不调用 next_，中止因此与成功同走一条结果通道。
         try:
-            value = self._ctx.waterfall(
+            outcome = self._ctx.waterfall(
                 "tools/execute",
                 {**payload, "timeout_ms": tool.timeout_ms},
                 lambda p: tool.execute(p["args"]),
             )
-        except Exception as exc:  # 工具异常 → 结构化失败结果，不崩整轮
-            return {"status": "error", "name": name, "error": f"{type(exc).__name__}: {exc}"}
-        return {"status": "ok", "name": name, "value": value}
+        except Exception as exc:  # 工具体异常 → 结构化 failed 结局，不崩整轮
+            return {"status": FAILED, "name": name, "error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(outcome, AbortOutcome):
+            return {"status": outcome.code, "name": name, "error": outcome.error}
+        return {"status": OK, "name": name, "value": outcome}
 
     def _guard(self, payload: dict, decision: dict) -> dict:
         """单调 guard：监听器可返回更严格的决策；更宽松的返回被忽略。"""
@@ -132,8 +145,8 @@ class ToolRuntime(Plugin):
         return "allow" if resolved.get("kind") == "allow" else "deny"
 
     def _finalize(self, tool: ToolDefinition | None, result: dict) -> dict:
-        """收敛出模型可见的 `content`（恒为字符串）。"""
-        if result["status"] == "ok":
+        """收敛出模型可见的 `content`（恒为字符串）：成功取 value，中止取 error。"""
+        if result["status"] == OK:
             value = result.get("value")
             result["content"] = (tool.finalize_content(value) if tool.finalize_content
                                  else _to_content(value))

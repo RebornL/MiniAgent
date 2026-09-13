@@ -87,16 +87,44 @@ def test_compaction_is_surface_replacement_and_log_rebuilds_history():
     before = session.derive_messages()
     raw_log = list(session.events)
 
-    session.compact("此前讨论了第一问与第一答", [first_ask["seq"], first_answer["seq"]])
+    compacted = session.compact("此前讨论了第一问与第一答",
+                                [first_ask["seq"], first_answer["seq"]])
 
-    # 日志只增不改：原始事件原样保留
+    # 压缩事件记下「被遮蔽的事件范围」与「替换内容」，摘要本体另存（下一次压缩的输入）
+    assert compacted["shadowed_seqs"] == [first_ask["seq"], first_answer["seq"]]
+    assert compacted["shadowed_range"] == {"start": first_ask["seq"], "end": first_answer["seq"]}
+    assert compacted["replacement"] == [
+        {"role": "user", "content": "[上下文已压缩] 此前讨论了第一问与第一答"}]
+    assert compacted["summary"] == "此前讨论了第一问与第一答"
+    # 日志只增不改：被遮蔽的原始事件原样保留
     assert session.events[:len(raw_log)] == raw_log
-    # 投影：摘要落在被替换区间的位置，被替换内容不再进模型
+    # 投影：替换内容落在被遮蔽区间的起始位置，被遮蔽内容不再进模型
     assert [m["content"] for m in session.derive_messages()] == [
         "你是助手", "[上下文已压缩] 此前讨论了第一问与第一答", "第二问",
     ]
+    # 投影只由日志算出：把它重放进一个新 Session 结果逐字相同（无内存旁路）
+    assert Session(events=list(session.events)).derive_messages() == session.derive_messages()
     # 用压缩前的日志重放，仍能重建出同样的模型可见历史
     assert Session(events=raw_log).derive_messages() == before
+
+
+def test_a_later_compaction_supersedes_the_replacement_it_shadows():
+    """第二次压缩覆盖了上一次的替换内容：投影里只留最新的那份，不层层堆叠。"""
+    session = Session()
+    session.append("system/message", content="你是助手")
+    ask = session.append("user/message", content="第一问")
+    answer = session.append("assistant/message", content="第一答")
+    second = session.append("user/message", content="第二问")
+    session.compact("第一份摘要", [ask["seq"], answer["seq"]])
+    third = session.append("user/message", content="第三问")
+
+    # 第二次压缩连同上一次的替换内容一起遮蔽（锚点即第一条被遮蔽事件的 seq）
+    session.compact("第二份摘要（已含第一份）",
+                    [ask["seq"], answer["seq"], second["seq"], third["seq"]])
+
+    assert [m["content"] for m in session.derive_messages()] == [
+        "你是助手", "[上下文已压缩] 第二份摘要（已含第一份）",
+    ]
 
 
 # ═══════════════ S5 辅助 seam（纯函数）：日志与投影 ═══════════════

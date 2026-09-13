@@ -24,15 +24,18 @@
 flowchart TB
     A["tools/pre-execute<br/>allow / deny / ask"] -->|"权限 / 审批"| B["tools/guard<br/>单调：只能收紧"]
     B --> C{"最终决策"}
-    C -->|"allow"| D["tools/execute<br/>around 包装：超时 / 重试 / 计量"]
+    C -->|"allow"| D["tools/execute<br/>around 包装：超时 / 重试 / 计量<br/>可返回 AbortOutcome 短路"]
     C -->|"ask"| E["tools/approve"]
     E --> C
     C -->|"deny"| F["tool/denied<br/>工具体不执行，无权威结果"]
     D --> G["tools/post-execute<br/>接受 / 改写：输出校验 / 提醒注入"]
     G --> H["finalize_content<br/>收敛出恒为 str 的 content"]
-    H --> I["tools/result<br/>不可变权威结果（仅 ok / error）"]
+    H --> I["tools/result<br/>不可变权威结果：ok / timed_out / cancelled / failed"]
 ```
 
+工具要么以 `ok` 收尾，要么以四种**中止结局**之一收尾，四者带稳定错误码
+（`timed_out` / `cancelled` / `denied` / `failed`）、与成功**同构**（同一组键、同一条结果通道），
+因此调用方不必接异常，重试策略只读结局码就能决策（见 `capabilities/retry`）。
 `deny` 不产生权威结果：落 `tool/denied`、不发 `tools/result`、工具体不执行。
 
 ## 3. 包地图
@@ -65,16 +68,24 @@ flowchart TB
 
 ### 两处有意偏离 legacy
 
-1. **超时报 `error` 而非 `ok`**：legacy 的 `CallFunc.call_with_timeout` 把超时也返回成字符串，管道只好把它当成功。现在 `ToolTimeoutPlugin` 抛 `ToolTimeout`，权威结果明确是 `error`，下游可按 `status` 区分「超时」与「成功」。
+1. **超时报 `timed_out`，不是一个字符串、也不再混同于 `failed`**：legacy 的 `CallFunc.call_with_timeout`
+   把超时也返回成字符串，管道只好把它当成功。现在 `ToolTimeoutPlugin` 返回结构化的
+   `AbortOutcome(timed_out)`，权威结果带稳定的 `timed_out` 码，下游（重试、呈现）按码区分
+   「超时」「取消」「被拒」「失败」与「成功」。
 2. **`AgentTrace.log_llm_call` 改收纯数据**：原签名吃 OpenAI SDK 的响应对象，逼得日志消费者伪造一个假响应。现在只收已归一化的 `messages` / `content` / `tool_calls`，SDK 形状的耦合留在 provider 一层。
 
 ### 超时的边界（已知限制）
 
 超时**只能「停止等待」，不能「取消执行」**。工具体跑在线程里，而 Python 杀不掉线程，所以一次超时意味着：
 
-- 立刻返回结构化 `error`（`工具 <name> 执行超时（<N>ms 未返回）`），不再等它；
+- 立刻返回结构化结局 `timed_out`（`工具 <name> 执行超时（<N>ms 未返回）`），不再等它；
 - 丢弃它的返回值；
 - **但不会停止它**——被放弃的工具体仍会跑到底，它已产生的副作用（例如慢写文件留下的半成品）**不会回滚**。
+
+`timed_out` 是可重试的结局码（`capabilities.retry.definition.RETRYABLE_OUTCOMES`），所以默认
+重试策略**会**重试它——而此刻被放弃的工具体可能还在跑，重试等于再启动一次，副作用由谁承担
+只有装配者知道。不接受这个风险就自行装配更窄的策略（码表与退避参数都在 `capabilities/retry/`，
+Loop 一行都不用改）。
 
 一个实现细节值得记住：工具体跑在 **daemon 线程**里（`threading.Event.wait(timeout)` 限时），而不是 `ThreadPoolExecutor`。非 daemon 的 worker 会在解释器退出时被 `_python_exit` join，于是一个卡死的工具**能把整个进程挂到它跑完**。legacy 的 `CallFunc.call_with_timeout` 正是如此——`with ThreadPoolExecutor(...)` 退出即 `shutdown(wait=True)`，那句「已取消执行」其实是在**等到底之后**才返回的。`test_timeout_does_not_block_process_exit` 用子进程守住这条：修复前该测试会挂满超时。
 
@@ -107,7 +118,7 @@ class AuditPlugin(Plugin):
 | seam | 层 | 覆盖 |
 | --- | --- | --- |
 | **S2** | `Loop.turn`（集成） | 工具体执行、`tool/result` 按序入日志、最终答案正确；deny 时工具体不执行；终结工具收尾本轮；**只换装配的插件就改变结局，而 Loop 零改动** |
-| **S3** | `ToolRuntime.run`（契约） | deny → 工具体不执行；单调 guard 不可反向放行；ask 无审批者默认拒绝；工具异常收敛为结构化 error |
+| **S3** | `ToolRuntime.run`（契约） | 四种中止结局（超时 / 取消 / 被拒 / 失败）各有稳定码且与成功同构、同走 `tools/result`；deny → 工具体不执行；单调 guard 不可反向放行；ask 无审批者默认拒绝 |
 | **S5** | `Session` 投影（纯函数） | 确定且幂等；只含 model-visible 事件；压缩是 surface 替换、原日志可重放；`session_from_messages` 往返等价 |
 
 事件总线原语与插件装载 / disposer 是框架原语，按规格**不设 seam**。
@@ -213,7 +224,7 @@ sequenceDiagram
     loop 批内每个 tool_call（保证配对完整）
         L->>T: run(call)
         T->>C: waterfall(tools/pre-execute → guard → execute → post-execute)
-        T-->>L: ok / error / denied
+        T-->>L: ok / timed_out / cancelled / denied / failed
         L->>S: append(tool/result 或 tool/denied)
         L->>C: waterfall(agent/post-tool)
     end

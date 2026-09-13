@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from capabilities.validation.definition import sanitize_output, validate_output
 from miniharness.core import Context, Plugin
+from miniharness.tools.contract import FAILED, OK
 
 __all__ = ["ValidationPlugin"]
 
@@ -33,7 +34,7 @@ class ValidationPlugin(Plugin):
 
     def _post(self, payload: dict, next_: Callable[[], Any]) -> dict:
         result = next_()
-        if result.get("status") != "ok":
+        if result.get("status") != OK:
             return result
         name = result["name"]
         try:
@@ -42,5 +43,5 @@ class ValidationPlugin(Plugin):
             if schema is not None:
                 value = validate_output(value, schema)
         except ValueError as exc:
-            return {"status": "error", "name": name, "error": f"输出校验失败: {exc}"}
+            return {"status": FAILED, "name": name, "error": f"输出校验失败: {exc}"}
         return {**result, "value": value}
