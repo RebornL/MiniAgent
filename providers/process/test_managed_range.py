@@ -3,11 +3,13 @@
 用**真实子进程**证明受管范围的语义：终止以整棵进程树（含后代）为单位、可重复调用；
 释放返回时范围已经退出，不留孤儿；**组长自己先退出也不让范围变空**——这是范围本位与
 组长本位的分界。两条平台路径（POSIX 信号组升级 / Windows Job Object）共用这同一批断言；
-本机只实跑所在平台的那条。
+本机只实跑所在平台的那条。**「宽限 → 强杀」的升级档只存在于 POSIX 后端**：Windows 上
+`TerminateJobObject` 一次强杀到底，没有升级档（`grace_ms` 在那里只是等待的收尾上限），
+所以它的真实触发用例带 `skipif(os.name == "nt")` ——见
+`test_terminate_escalates_to_a_hard_kill_when_the_signal_is_ignored`。
 """
 from __future__ import annotations
 
-import ctypes
 import os
 import signal
 import subprocess
@@ -19,6 +21,7 @@ from typing import TextIO
 import pytest
 
 from providers.process import SubprocessRange, SubprocessSeam
+from providers.process.probe import _alive, _assert_gone
 
 
 #: 子进程树剧本：组长再派生一个后代，把后代的 pid 写进 argv[1]，然后两个一起长睡。
@@ -49,43 +52,15 @@ print(owned.pid, owned.poll() is None, flush=True)
 os._exit(0)
 """
 
-_STILL_ACTIVE = 259
-_ERROR_INVALID_PARAMETER = 87
-
-
-def _alive(pid: int) -> bool:
-    """进程是否还在跑。
-
-    Windows 上「pid 存在」不等于「还活着」：已终止的进程只要还有句柄就被占着号，
-    所以要问退出码；OpenProcess 打不开且错误码是「参数无效」才是真的不存在。
-    """
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        return True
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenProcess(0x1000, False, pid)       # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        if ctypes.get_last_error() == _ERROR_INVALID_PARAMETER:
-            return False
-        raise OSError(f"OpenProcess({pid}) 失败：错误码 {ctypes.get_last_error()}")
-    try:
-        code = ctypes.c_ulong()
-        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) \
-            and code.value == _STILL_ACTIVE
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _assert_gone(*pids: int, timeout_s: float = 5.0) -> None:
-    """这些进程必须都不再存在（给终止一点收尾时间）。"""
-    deadline = time.monotonic() + timeout_s
-    while any(_alive(pid) for pid in pids):
-        if time.monotonic() >= deadline:
-            raise AssertionError(f"这些进程仍然存在: {[pid for pid in pids if _alive(pid)]}")
-        time.sleep(0.05)
+#: 拒绝温和档的剧本：先装好 SIGTERM 处置（忽略）再留下就绪标记，然后长睡——只有真升级到
+#: 强杀才停得下来。
+_STUBBORN_SCRIPT = """\
+import signal, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(sys.argv[1]).write_text("ready")
+time.sleep(300)
+"""
 
 
 def _leader_is_gone(range_: SubprocessRange, timeout_s: float = 20.0) -> bool:
@@ -203,6 +178,42 @@ def test_release_leaves_no_orphan_when_the_leader_exits_first(tmp_path):
         range_.release()                                # 幂等：重复释放不出错
     finally:
         out.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows Job Object 一次强杀到底，没有「宽限 → 强杀」升级档")
+def test_terminate_escalates_to_a_hard_kill_when_the_signal_is_ignored(tmp_path):
+    """POSIX 升级档真的会被触发：范围忽略 SIGTERM 时长睡——`terminate(grace_ms=200)` 返回时
+    它必须已经被强杀。
+
+    这是「宽限 → 强杀」唯一的真实触发点：其余剧本的子进程一碰 SIGTERM 就死，升级档从不执行。
+    若强杀那步被写坏（例如换成 `pass`），`terminate` 的收尾等待会等到 `_REAP_MS` 并把
+    「范围仍在跑」报成 `TerminationError`，这条断言因此会红而不是静默通过。
+
+    Windows 后端没有这一档（`TerminateJobObject` 一次到底，`grace_ms` 在那里只是等待上限），
+    故本机跳过——这条断言只在 POSIX 上有意义。
+    """
+    script, marker = tmp_path / "stubborn.py", tmp_path / "ready"
+    script.write_text(_STUBBORN_SCRIPT, encoding="utf-8")
+    out = (tmp_path / "stubborn.out").open("w", encoding="utf-8")
+    range_ = SubprocessSeam().spawn([sys.executable, str(script), str(marker)], stdout=out)
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # 就绪标记写在装好 SIG_IGN 之后：此刻起温和档真的杀不动它，「已被强杀」才不是白捡的
+        assert marker.exists(), "子进程没来得及忽略 SIGTERM"
+        assert _alive(range_.pid)
+
+        started = time.monotonic()
+        range_.terminate(grace_ms=200)                  # 温和档无效 → 必须升级到强杀
+        elapsed = time.monotonic() - started
+
+        assert range_.poll() is not None                # 返回即范围已退出
+        _assert_gone(range_.pid)
+        assert elapsed < 3, "升级档没有生效：等满了强杀之后的收尾上限"
+    finally:
+        out.close()
+        range_.release()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="KILL_ON_JOB_CLOSE 是 Windows Job Object 的兜底")

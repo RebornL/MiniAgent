@@ -2,7 +2,9 @@
 
 只被 `tests/` 下的集成测试使用；包内测试自带所需的最小 helper，也不依赖本模块。
 日志型 helper（`_event_types()`）按「下层 helper 留下层」的规则放在
-`miniharness/session/test_projection.py`，需要它的测试直接向下 import。
+`miniharness/session/test_projection.py`、进程存活探针（`_alive` / `_assert_gone`）放在
+`providers/process/probe.py`，需要它们的测试直接向下 import——**整个仓库只有一份实现**，
+抄第二份会让「独立确认」失去独立性。
 """
 from __future__ import annotations
 
@@ -19,7 +21,6 @@ from miniharness.tools.runtime import ToolRuntime
 from providers.mock import MockLLM
 from providers.process import SubprocessSeam
 from providers.sandbox import EnvSandbox
-
 
 CALC_PARAMS = {"expression": {"type": "string"}}
 WRITE_PARAMS = {"path": {"type": "string"}, "content": {"type": "string"}}

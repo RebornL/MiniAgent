@@ -38,11 +38,18 @@ class Context:
 
     # ── 服务 ───────────────────────────────────────
     def provide(self, key: str, service: Any) -> Callable[[], None]:
-        """注册服务，返回撤销它的 disposer；注册后重试激活挂起的插件。"""
+        """注册服务，返回撤销它的 disposer；注册后重试激活挂起的插件。
+
+        disposer 被调用时**把自己从效应栈上摘掉**（幂等）：长会话里「临时替换一个服务、用完立刻
+        还原」是常态（超时护栏每次工具调用都把 `process` 换成当次调用的登记代理），留在栈上的
+        闭包会连同它捕获的旧服务一起无界堆积——只有 `dispose()` 才回收。
+        """
         previous = self._services.get(key, _MISSING)
         self._services[key] = service
 
         def dispose() -> None:
+            if dispose in self._effects:          # 幂等：已出栈（或根本没入过栈）就不再摘
+                self._effects.remove(dispose)
             if previous is _MISSING:
                 self._services.pop(key, None)
             else:

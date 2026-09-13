@@ -27,7 +27,7 @@ __all__ = [
 #: 正常收尾的结局码。
 OK = "ok"
 
-#: 超过时限仍未返回。本层只保证「停止等待」（终止受管范围见 `process.contract` / T8）。
+#: 超过时限仍未返回。本层只给结局码；终止受管范围是策略层的事（见 `capabilities.timeout.provider`）。
 TIMED_OUT = "timed_out"
 #: 上层请求取消（用户中断、回合被放弃）。
 CANCELLED = "cancelled"

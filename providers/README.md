@@ -26,7 +26,7 @@ Provider 只认识契约：`DeepSeekProvider` 与 `MockLLM` 都只实现 `comple
 它们互相独立：沙箱先给出「可执行的 argv + 完整性要求」，受管范围再负责这棵进程树的生死。
 工具**在调用时刻**取这两个服务，因此策略层可以在这层包一个代理（记录当前范围 / 请求终止），
 把「超时或取消 → 终止受管范围」接起来——终止动词只有 `terminate` / `release` 两个，工具自己不用，
-沙箱也不认识它们。
+沙箱也不认识它们。这条接线已经落地：见 `capabilities/timeout/provider`（`ToolTimeoutPlugin`）。
 
 `EnvSandbox` 只强制环境收敛与 argv 解析；**凡它强制不了的策略要求一律拒绝服务**
 （`SandboxUnavailableError`），这就是「沙箱不可用必须 fail-closed」在实现侧的落点。
@@ -36,7 +36,11 @@ Provider 只认识契约：`DeepSeekProvider` 与 `MockLLM` 都只实现 `comple
 ## 本族的测试
 
 包内测试与实现同层、独立文件：`providers/process/test_managed_range.py` 用真实子进程树
-证明受管范围的语义——终止以整棵进程树为单位、组长先退出也不让范围变空、释放返回时不留孤儿；
+证明受管范围的语义——终止以整棵进程树为单位、组长先退出也不让范围变空、释放返回时不留孤儿。
+**「宽限 → 强杀」升级档只有 POSIX 后端有**：Windows 上 `TerminateJobObject` 一次强杀到底，
+所以它的真实触发用例（子进程忽略 SIGTERM 后长睡）带 `skipif(os.name == "nt")`，本机只跑
+Windows 那条。跨层共用的**进程存活探针**在非测试模块 `providers/process/probe.py`：包内测试与
+`tests/test_timeout.py` 共用同一份实现——独立确认不能抄两份，一处漂移就会让断言变成假证据。
 `providers/sandbox/test_env_sandbox.py` 用真实环境变量与真实文件系统证明沙箱**真能强制**的
 维度（白名单之外一个都不留、裸名字在收敛后的 PATH 里解析、强制不了的要求即拒绝服务），
 并证明 `wrap` 本身不执行任何东西。

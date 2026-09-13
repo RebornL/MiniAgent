@@ -11,5 +11,6 @@
   不可用即 `SandboxUnavailableError`（fail-closed，禁止静默透传无约束执行）；
 - **受管范围**（`miniharness.process.contract`）：只负责这棵进程树的生死——等退出、被终止。
 
-超时与「何时终止」都不在这里（那是策略层，见 T8）；工具只保证命令在沙箱里、跑在受管范围里。
+超时与「何时终止」都不在这里（那是策略层：超时 / 取消 → 终止受管范围，见
+`capabilities.timeout.provider`）；工具只保证命令在沙箱里、跑在受管范围里。
 """

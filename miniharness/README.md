@@ -42,6 +42,7 @@
 
 | 文件 | seam | 覆盖 |
 | --- | --- | --- |
+| `miniharness/core/test_context.py` | ——（框架原语，无 seam） | `provide` 的 disposer 被调用后自己出栈（「替换 → 显式还原」不堆效应栈）、`dispose()` 逆序逐层还原嵌套替换、disposer 重入与混用幂等 |
 | `miniharness/session/test_projection.py` | S5（纯函数） | 投影确定幂等、只含 model-visible 事件、压缩是 surface 替换且原日志可重放、逆投影往返等价、订阅者观察日志不改投影 |
 | `miniharness/tools/runtime/test_pipeline.py` | S3（工具管线契约） | 四种中止结局各有稳定码且与成功同构、同走 `tools/result`；deny 不执行工具体；单调 guard 不可反向放行；ask 无审批者默认拒绝；并提供 `_pipeline()` 供能力测试复用 |
 

@@ -14,7 +14,7 @@
 | 会话 = append-only 事件日志 | `miniharness/session` | `append` 只增不改；`derive_messages()` 是投影；`session_from_messages()` 是其逆 |
 | 能力 seam | `miniharness/llm/contract`、`miniharness/tools/{contract,runtime}`、`providers/` | 契约 + Provider + 消费方三分，换后端不动循环 |
 | 依赖注入、按需激活 | `Plugin.inject`、`Context.load` | 依赖未就绪则挂起，就绪后自动激活 |
-| 注册可逆 | `Context.effect`、`Context.unload` | 每个注册返回 disposer，卸载逆序 unwind |
+| 注册可逆 | `Context.effect`、`Context.unload` | 每个注册返回 disposer，卸载逆序 unwind；`provide` 的 disposer 被调用时自己出栈（长会话里「临时替换服务、用完还原」不堆效应栈） |
 
 **核心不变量：Model-visible means logged** —— 凡进入模型的内容，都必须能从会话日志重建。
 
@@ -74,26 +74,46 @@ flowchart TB
    「超时」「取消」「被拒」「失败」与「成功」。
 2. **`AgentTrace.log_llm_call` 改收纯数据**：原签名吃 OpenAI SDK 的响应对象，逼得日志消费者伪造一个假响应。现在只收已归一化的 `messages` / `content` / `tool_calls`，SDK 形状的耦合留在 provider 一层。
 
-### 超时的边界（已知限制）
+### 超时 / 取消：终止受管范围
 
-超时**只能「停止等待」，不能「取消执行」**。工具体跑在线程里，而 Python 杀不掉线程，所以一次超时意味着：
+超时与取消**不再是「停止等待」的口头承诺**。`ToolTimeoutPlugin` 在本次工具调用期间把 `process`
+服务包成一层登记代理——工具体在调用时刻经 `ctx.get("process")` 取 seam，所以策略层能在这层接线，
+工具自己不用认识终止：
 
-- 立刻返回结构化结局 `timed_out`（`工具 <name> 执行超时（<N>ms 未返回）`），不再等它；
-- 丢弃它的返回值；
-- **但不会停止它**——被放弃的工具体仍会跑到底，它已产生的副作用（例如慢写文件留下的半成品）**不会回滚**。
+```mermaid
+flowchart LR
+    T["时限到 / 取消请求"] --> A["登记册<br/>本次调用起的受管范围"]
+    A --> B["terminate(grace_ms)<br/>终止整棵进程树"]
+    B --> C["独立确认<br/>范围真的空了"]
+    C --> D["等工具体静止"]
+    D --> E["结构化结局<br/>timed_out / cancelled"]
+```
 
-`timed_out` 是可重试的结局码（`capabilities.retry.definition.RETRYABLE_OUTCOMES`），所以默认
-重试策略**会**重试它——而此刻被放弃的工具体可能还在跑，重试等于再启动一次，副作用由谁承担
-只有装配者知道。不接受这个风险就自行装配更窄的策略（码表与退避参数都在 `capabilities/retry/`，
-Loop 一行都不用改）。
+- **终止以受管范围为单位**：整棵进程树（含后代）一起停，不靠一个个杀进程；`terminate` 返回即
+  范围已退出，接线处再 `poll()` 独立确认一次——终止没达成目的就抛 `TerminationError`，
+  **不把「其实还活着」报成超时**。**终止手段随平台**：POSIX 后端先 `SIGTERM` 全组、宽限期满仍
+  不退再 `SIGKILL`（升级档的真实触发用例见 `providers/process/test_managed_range.py`，本机
+  skip）；**Windows 后端没有升级档**——Job Object 的 `TerminateJobObject` 一次强杀到底，
+  `grace_ms` 在那里只是等工具体静止的上限。
+- **已启动的工具体跑到静止后才允许替换其结果**：先终止实体，再等它自己的等待返回，最后才用
+  中止结局替换它本会产出的值。
+- **取消与超时同一条路径**，区别只在结局码。取消入口是 `ToolTimeoutPlugin.cancel()`
+  （同时以 `ctx.get("abort")` 暴露）。**本仓暂无取消源**——用户中断 / 回合放弃还没接线，没有谁
+  调用它；接上取消源是后续工作。
+- **每次尝试各有各的册**：`timed_out` 可重试（`capabilities.retry.definition.RETRYABLE_OUTCOMES`），
+  默认重试策略**会**重试它；重试的第 N 次重新起进程、重新登记，上一次的树早已终止，互不牵连。
 
-一个实现细节值得记住：工具体跑在 **daemon 线程**里（`threading.Event.wait(timeout)` 限时），而不是 `ThreadPoolExecutor`。非 daemon 的 worker 会在解释器退出时被 `_python_exit` join，于是一个卡死的工具**能把整个进程挂到它跑完**。legacy 的 `CallFunc.call_with_timeout` 正是如此——`with ThreadPoolExecutor(...)` 退出即 `shutdown(wait=True)`，那句「已取消执行」其实是在**等到底之后**才返回的。`test_timeout_does_not_block_process_exit` 用子进程守住这条：修复前该测试会挂满超时。
+**剩余边界**：没有受管范围可终止的工具体（纯 Python 的慢工具）只能「停止等待」——Python 杀不掉
+线程，被放弃的工具体仍会跑到底，它已产生的副作用（例如慢写文件留下的半成品）**不会回滚**。
+因此工具体一律跑在 **daemon** 线程里（`threading.Event.wait(timeout)` 限时），而不是
+`ThreadPoolExecutor`：非 daemon 的 worker 会在解释器退出时被 `_python_exit` join，于是一个卡死的
+工具**能把整个进程挂到它跑完**。legacy 的 `CallFunc.call_with_timeout` 正是如此——
+`with ThreadPoolExecutor(...)` 退出即 `shutdown(wait=True)`，那句「已取消执行」其实是在**等到底
+之后**才返回的。`test_timeout_does_not_block_process_exit` 用子进程守住这条。
 
-真正的取消与副作用隔离需要**进程级边界**：进程级终止已经落地——受管范围 seam 的 `terminate`
-会终止整棵进程树（见下面的「沙箱」与 `providers.process`）；但**文件系统与网络级隔离仍未
-实现**：`EnvSandbox` 不隔离文件系统，`deny_network` 只拒绝、不强制。
+**文件系统与网络级隔离仍未实现**：`EnvSandbox` 不隔离文件系统，`deny_network` 只拒绝、不强制。
 
-同理，`ToolRuntime` 只保证「批内每个 `tool_call` 都落一条配对结果」（否则下一轮上行会被兼容接口以 tool_calls 未配对拒绝），**不保证**被放弃的工具体停止运行。
+同理，`ToolRuntime` 只保证「批内每个 `tool_call` 都落一条配对结果」（否则下一轮上行会被兼容接口以 tool_calls 未配对拒绝）；进程型工具体现在真会停，但上面那条「杀不掉线程」的边界对纯 Python 工具体依旧成立。
 
 ### 沙箱：只包装 argv，不可用即 fail-closed
 
@@ -173,6 +193,14 @@ class AuditPlugin(Plugin):
 可观察行为分别落在 `providers/sandbox/test_env_sandbox.py`（它真能强制的维度）与
 `tests/test_sandbox.py`（装配后的 fail-closed 失败注入 + 非空洞对照）；「沙箱不负责终止」
 的证据在 `tests/test_shell.py` 那条外部终止受管范围的用例里（同一条命令先过沙箱）。
+
+超时 / 取消 → 终止的接线用的是同一个「进程边界」seam：接线本身（登记册、终止、结局）在
+`capabilities/timeout/provider/test_timeout.py` 用受管范围替身验；「进程真的没了」在
+`tests/test_timeout.py` 用**真实子进程**验，并由操作系统独立确认
+（`providers.process.probe._alive`，不采信被测实现自己的返回值）。**「宽限 → 强杀」升级档
+只有 POSIX 后端有**（Windows 的 Job Object 一次强杀到底），它的真实触发用例带
+`skipif(os.name == "nt")`，只在 POSIX 上实跑。核心原语的效应栈语义在
+`miniharness/core/test_context.py` 验。
 
 ## 7. 运行
 

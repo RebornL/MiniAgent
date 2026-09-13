@@ -35,7 +35,8 @@ __all__ = [
     "TerminationError",
 ]
 
-#: 终止升级的默认宽限期（毫秒）：先温和请求，宽限期满仍不退再强杀。
+#: 终止宽限期的默认值（毫秒）：POSIX 后端先温和请求（SIGTERM），宽限期满仍不退再强杀
+#: （SIGKILL）；Windows 后端没有温和档，一次强杀到底，此时它不参与升级。
 DEFAULT_GRACE_MS = 2000
 
 
@@ -71,7 +72,8 @@ class ManagedRange:
         raise NotImplementedError
 
     def terminate(self, grace_ms: int = DEFAULT_GRACE_MS) -> None:
-        """终止整个范围：先温和、宽限期满仍不退再强杀；返回时范围已退出。
+        """终止整个范围：手段随平台后端（POSIX：先 SIGTERM、宽限期满仍不退再 SIGKILL；
+        Windows：一次强杀整棵树）。返回时范围已退出。
 
         幂等：范围已空（或已释放）时为 no-op。强杀后仍无法确认退出才抛 `TerminationError`。
         """
