@@ -60,7 +60,7 @@ flowchart TB
 | `with_retry(...)` | `RetryPlugin` → `tools/execute`（around） |
 | `call_with_timeout(...)` | `ToolTimeoutPlugin` → `tools/execute`（around） |
 | 输出校验 / sanitize | `ValidationPlugin` → `tools/post-execute` |
-| `pm.save_session(...)` | `PersistenceConsumer` → Session 日志订阅 |
+| `pm.save_session(...)` | `PersistenceConsumer` → Session 日志订阅（有界写后缓冲；`flush()` 屏障；订阅 `agent/checkpoint` 在三个语义点 fail-closed 落盘） |
 | `tracer.*(...)` | `TraceConsumer` → Session 日志订阅 |
 | `skills.load` + 工具注册 | `SkillRegistry` → `ToolRuntime` 可逆注册 |
 | `build_system_prompt` 每步覆写 | `SystemPromptPlugin` → `tools/result` / `agent/pre-step` |
@@ -93,9 +93,23 @@ Loop 一行都不用改）。
 
 同理，`ToolRuntime` 只保证「批内每个 `tool_call` 都落一条配对结果」（否则下一轮上行会被兼容接口以 tool_calls 未配对拒绝），**不保证**被放弃的工具体停止运行。
 
-### 一处未装
+### 写盘：有界写后缓冲 + 屏障 + 三个检查点
 
-`build_harness()` **不装 `PermissionPlugin`**——legacy 没有审批概念，装了会改变行为。审批能力本身在 `capabilities/permission/provider/` 里，需要时按 §5 自行装配。
+事件先入内存日志（`Session.events`），再进**有界写后缓冲**：缓冲未满不落盘，满容或回合边界时
+批量落盘——写盘次数不随 `append` 次数增长，待落盘项也不会无限堆积。`PersistenceConsumer.flush()`
+是**显式屏障**：它返回才构成崩溃承诺，重复调用幂等（没有待落盘项时不触碰盘）。
+
+`Loop` 在三个语义点派发 `agent/checkpoint`——**每步开始前 / 向模型发起请求前 / 顶层工具派发前**；
+持久化能力订阅它并 fail-closed 地过屏障：屏障抛错就不让下游的副作用发生。于是一旦模型真的被请求、
+工具真的跑了，它们所依赖的历史已经在盘上。写失败时未落盘项留在队列里可原地重试，写残的尾行在
+下次写入前修掉——日志不出现半条记录，崩溃后仍可解析、可重放（丢的只是屏障之后的事件）。
+
+### 一处未装（T9 起收窄为例外）
+
+`build_harness()` 原先**不装 `PermissionPlugin`**——legacy 没有审批概念，装了会改变行为。
+T9 之后装配层只为**一个**工具开例外：`run_command` 给出 `ask`，没有审批者时默认拒绝
+（工具体不执行），其余工具行为不变——真正执行外部命令的工具才需要这道门槛。
+审批能力本身在 `capabilities/permission/provider/` 里，需要时按 §5 自行装配。
 
 ## 5. 怎么加一个策略（不碰 Loop）
 
@@ -217,16 +231,21 @@ sequenceDiagram
     L->>S: append(turn/start)
     L->>C: waterfall(agent/pre-step)
     L->>S: append(user/message)
-    L->>S: derive_messages()（投影）
-    L->>M: complete(messages)
-    M-->>L: {text, tool_calls}
-    L->>S: append(assistant/message)
-    loop 批内每个 tool_call（保证配对完整）
-        L->>T: run(call)
-        T->>C: waterfall(tools/pre-execute → guard → execute → post-execute)
-        T-->>L: ok / timed_out / cancelled / denied / failed
-        L->>S: append(tool/result 或 tool/denied)
-        L->>C: waterfall(agent/post-tool)
+    loop 每个 step（模型采样 → 执行它请求的工具）
+        L->>C: emit(agent/checkpoint: 每步开始前 / 模型请求前)
+        Note over C: 检查点策略 fail-closed 落盘
+        L->>S: derive_messages()（投影）
+        L->>M: complete(messages)
+        M-->>L: {text, tool_calls}
+        L->>S: append(assistant/message)
+        loop 批内每个 tool_call（保证配对完整）
+            L->>C: emit(agent/checkpoint: 顶层工具派发前)
+            L->>T: run(call)
+            T->>C: waterfall(tools/pre-execute → guard → execute → post-execute)
+            T-->>L: ok / timed_out / cancelled / denied / failed
+            L->>S: append(tool/result 或 tool/denied)
+            L->>C: waterfall(agent/post-tool)
+        end
     end
     L->>S: append(turn/end)
     L-->>U: 最终答案

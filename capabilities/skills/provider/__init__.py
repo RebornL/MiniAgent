@@ -2,7 +2,9 @@
 
 `SkillRegistry` 把技能工具经 `ToolRuntime` 可逆注册（装载即挂、卸载即撤销），
 复用契约包 `capabilities.skills.definition` 的技能目录与激活记录，
-并暴露 legacy 的 `load_skill` / `unload_skill` 两个 meta 工具。
+并暴露 legacy 的 `load_skill` / `unload_skill` 两个 meta 工具；两者的描述里列出
+**当前可用 / 已加载**的技能名（legacy `{available_skills}` 行为），因此默认不装载的
+技能（如 `shell`）也能被模型发现——这是发现技能的唯一入口。
 
 装载/卸载同时写成 `skill/loaded` / `skill/unloaded` 事件：状态由日志决定，
 `restore(events)` 折叠这些事件重建激活集（含工具注册与领域提示），不读任何旁路元数据。
@@ -43,6 +45,7 @@ class SkillRegistry(Plugin):
         self.manager = manager or SkillManager()
         self._skills: dict[str, Skill] = {}   # SkillManager 不提供按名查询
         self._active: dict[str, Callable[[], None]] = {}
+        self._meta_tools: dict[str, ToolDefinition] = {}   # 描述随技能目录与激活集刷新
 
     def apply(self, ctx: Context) -> None:
         self._ctx = ctx
@@ -50,23 +53,46 @@ class SkillRegistry(Plugin):
         self._session: Session = ctx.get("session")
         ctx.provide("skills", self)
         ctx.effect(self.unload_all)          # 插件卸载时撤销全部已装载技能（可逆注册）
-        # meta 工具随插件卸载一并撤销
-        self._tools.register(ToolDefinition(
-            name="load_skill", description="加载一个技能模块，其工具立即可用",
-            parameters={"type": "object", "properties": {"name": {"type": "string"}},
-                        "required": ["name"]},
-            execute=lambda args: self.load_skill(args.get("name", "")),
-        ))
-        self._tools.register(ToolDefinition(
-            name="unload_skill", description="卸载一个技能模块，其工具立即撤销",
-            parameters={"type": "object", "properties": {"name": {"type": "string"}},
-                        "required": ["name"]},
-            execute=lambda args: self.unload_skill(args.get("name", "")),
-        ))
+        # meta 工具随插件卸载一并撤销。描述在这里留空、由 `_refresh_meta_tool_descriptions`
+        # 填上当前可用 / 已加载的技能名——模型只看得见 meta 工具，这是技能的可发现性来源。
+        self._meta_tools = {
+            "load_skill": ToolDefinition(
+                name="load_skill", description="",
+                parameters={"type": "object", "properties": {"name": {"type": "string"}},
+                            "required": ["name"]},
+                execute=lambda args: self.load_skill(args.get("name", "")),
+            ),
+            "unload_skill": ToolDefinition(
+                name="unload_skill", description="",
+                parameters={"type": "object", "properties": {"name": {"type": "string"}},
+                            "required": ["name"]},
+                execute=lambda args: self.unload_skill(args.get("name", "")),
+            ),
+        }
+        for tool in self._meta_tools.values():
+            self._tools.register(tool)
+        self._refresh_meta_tool_descriptions()
+
+    def _refresh_meta_tool_descriptions(self) -> None:
+        """把「可用技能 / 当前已加载」写进 meta 工具的**描述**（legacy `{available_skills}` 行为）。
+
+        描述不再是硬编码的一句，而是随技能目录与激活集刷新（`ToolRuntime.specs()` 每次读的
+        都是同一对象上的当前值）。这是模型发现技能的唯一入口：默认不装载的技能（如 `shell`）
+        既不在 base prompt 里点名，装载前也不注入自己的提示，只能从这里点得到。
+        """
+        if not self._meta_tools:
+            return
+        available = ", ".join(self._skills) or "无"
+        loaded = ", ".join(self.active_names()) or "无"
+        self._meta_tools["load_skill"].description = (
+            f"加载一个技能模块，其工具立即可用。可用技能: {available}")
+        self._meta_tools["unload_skill"].description = (
+            f"卸载一个技能模块，其工具立即撤销。当前已加载: {loaded}")
 
     def register(self, skill: Skill) -> None:
         self._skills[skill.name] = skill
         self.manager.register(skill)
+        self._refresh_meta_tool_descriptions()
 
     def load(self, name: str) -> Callable[[], None]:
         """装载技能：可逆注册 + 记一条 `skill/loaded`；返回**会记日志**的卸载 disposer（幂等）。
@@ -131,6 +157,7 @@ class SkillRegistry(Plugin):
             self.manager.unload(name)
 
         self._active[name] = unload
+        self._refresh_meta_tool_descriptions()   # 「当前已加载」随激活集刷新
         return self._ctx.effect(unload)
 
     def _apply_unload(self, name: str) -> bool:
@@ -143,6 +170,7 @@ class SkillRegistry(Plugin):
         if disposer is None:
             return False
         disposer()
+        self._refresh_meta_tool_descriptions()   # 「当前已加载」随激活集刷新
         return True
 
     def unload_all(self) -> None:

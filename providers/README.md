@@ -20,6 +20,10 @@ Provider 只认识契约：`DeepSeekProvider` 与 `MockLLM` 都只实现 `comple
 `ProcessSeam.spawn`，消费方经 `ctx.get("process")` 拿的是契约（见
 [`miniharness/README.md`](../miniharness/README.md)），装配由 `app/` 负责。
 
+受管范围目前唯一的真实消费方是 `capabilities.shell.provider.ShellTool`（`run_command`）。
+它**在调用时刻**取 `process` 服务，因此策略层可以在这层包一个代理（记录当前范围 / 请求终止），
+把「超时或取消 → 终止受管范围」接起来——终止动词只有 `terminate` / `release` 两个，工具自己不用。
+
 ## 本族的测试
 
 包内测试与实现同层、独立文件：`providers/process/test_managed_range.py` 用真实子进程树

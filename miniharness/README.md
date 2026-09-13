@@ -19,7 +19,7 @@
 | `miniharness.llm.contract` | LLM 能力的 **Definition（契约）** | `LLM.complete(messages) -> {text, tool_calls?}` | `core` |
 | `miniharness.process` | 中间包：受管范围 seam 角色包的**归属层** | 说明这层 seam：契约在骨架、平台后端在 `providers.process`；不放实现 | 无 |
 | `miniharness.process.contract` | 受管范围 seam 的 **Definition（契约）** | `ManagedRange`（`poll` / `wait_for_exit` / `terminate` / `release`）与 `ProcessSeam.spawn`：以整棵进程树为单位，终止幂等 | `core` |
-| `miniharness.loop` | 三个契约的 **Consumer（消费方）** | `Loop`：取输入 → `agent/pre-step` → llm seam → tools 管线 → 落日志；**零策略** | `core`、`session`、`tools.runtime`、`llm.contract` |
+| `miniharness.loop` | 三个契约的 **Consumer（消费方）** | `Loop`：取输入 → `agent/pre-step` → llm seam → tools 管线 → 落日志；在每步开始前 / 模型请求前 / 顶层工具派发前派发 `agent/checkpoint`（`CHECKPOINT_*`，订阅者抛错即 fail-closed）；**零策略** | `core`、`session`、`tools.runtime`、`llm.contract` |
 
 **为什么 `tools.contract` 与 `tools.runtime` 是两个包**：契约低频、流水线可变。按变化速率拆包，
 频繁的运行时改动不会牵动工具作者依赖的那个接口。LLM 同理：契约在本族，实现在 `providers/`。

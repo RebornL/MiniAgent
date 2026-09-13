@@ -38,6 +38,11 @@ Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/` for ADRs. See
 
 前三类不能只靠子 agent 的自述或合成数据；第 4 类是判断「这条测试到底有没有用」的唯一手段。
 
+5. **核验要跑在全新进程里**——长活的内核 / Python 进程会持有**改动前的模块**（本次实测：`eval`
+   内核里 `LOG_VERSION` 仍是 1、`read_log` 的代码对象还指在旧行号上，而文件早已升到 2），据它
+   得出的「修复无效」是假警报，据它得出的「修复有效」同样是假证据。探针一律用新起的 `python`
+   进程或临时脚本；断言红之前，先确认读到的代码对象版本与文件一致。
+
 ### 数据与文档的边界
 
 - **真实会话数据不入库**：`agent_sessions/` 在 `.gitignore` 里，而仓库是公开的。测试 fixture 用

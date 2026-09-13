@@ -26,10 +26,15 @@ python -m app                 # 交互式对话（需要根目录 config.json）
 | `app.stack_demo` | 全栈 smoke run：`python -m app.stack_demo`（离线，压缩 / 重试 / 超时 / 持久化 / 追踪 / 技能） |
 | `app.deepseek_demo` | 真实联调 demo：`python -m app.deepseek_demo`（联网，需根目录 config.json；真实 provider + 终结工具） |
 
-装配侧的两条既有约定（包化前就是这样，未改）：
+装配侧的三条约定：
 
-1. `build_harness()` **不装 `PermissionPlugin`** —— legacy 没有审批概念，装了就是凭空加行为；
-2. 工具不预注册：只随技能装载经 `SkillRegistry` 可逆注册（`unload_skill` 即撤销）。
+1. 工具不预注册：只随技能装载经 `SkillRegistry` 可逆注册（`unload_skill` 即撤销）——
+   包化前就是这样，未改；
+2. 审批策略装得**很窄**：只对 `run_command` 给出 `ask`（`ask` 无审批者时由 `ToolRuntime`
+   默认拒绝，工具体不执行）。其余工具的行为与 legacy 一致——legacy 没有审批概念，
+   只有真正执行外部命令的工具需要这道门槛；
+3. `shell` 技能默认**不装载**：模型要先 `load_skill('shell')` 才能看见 `run_command`；
+   它的工具与结果形状来自能力族（`capabilities.shell`），先经受管范围执行，可被策略层终止。
 
 ## 本族的测试
 

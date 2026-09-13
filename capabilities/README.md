@@ -23,13 +23,14 @@
 | 能力 | Definition（契约包） | Provider（实现包） | Consumer（消费方包） |
 | --- | --- | --- | --- |
 | `compaction` 压缩 | `capabilities.compaction.definition`（`CompactionConfig` / `ContextManager` / `to_text` / `compaction_summaries`） | `capabilities.compaction.provider`（`CompactionPlugin`、`stub_summarizer`） | `miniharness.session`（把压缩事件投影成 surface 替换）、`app.assembly`（重放日志恢复摘要链） |
-| `persistence` 持久化 | `capabilities.persistence.definition`（`Store` / `PersistenceManager` / 事件日志的格式版本与迁移链） | `capabilities.persistence.provider`（`PersistenceConsumer`，订阅 Session 日志落盘，`flush()` 是崩溃承诺的屏障） | `app.assembly`、`app.cli`（重放日志恢复会话、列出历史） |
+| `persistence` 持久化 | `capabilities.persistence.definition`（`Store` / `PersistenceManager` / 事件日志的格式版本与迁移链） | `capabilities.persistence.provider`（`PersistenceConsumer`：有界写后缓冲 + `flush()` 屏障，订阅 `agent/checkpoint` 在三个语义点 fail-closed 落盘） | `app.assembly`、`app.cli`（重放日志恢复会话、列出历史）；`miniharness.loop` 只**派发 `agent/checkpoint` seam 事件**（每步开始前 / 模型请求前 / 工具派发前），不 import 本能力的任何契约 |
 | `retry` 重试 | `capabilities.retry.definition`（`is_retryable` / `is_retryable_outcome` / `with_retry`） | `capabilities.retry.provider`（`RetryPlugin`） | `miniharness.tools.runtime`（消费被包装后的调用结果） |
 | `timeout` 超时 | `capabilities.timeout.definition`（`DEFAULT_TOOL_TIMEOUT` 与超时调用语义） | `capabilities.timeout.provider`（`ToolTimeoutPlugin`） | `miniharness.tools.runtime`（把超时结局规范化成结构化结果）、`capabilities.retry.provider`（按结局码决定是否重试） |
 | `validation` 输出校验 | `capabilities.validation.definition`（`sanitize_output` / `validate_output` 的注入检测与 schema 校验） | `capabilities.validation.provider`（`ValidationPlugin`） | `miniharness.tools.runtime`（消费被改写后的权威结果） |
 | `tracing` 追踪 | `capabilities.tracing.definition`（`Span` / `AgentTracer`） | `capabilities.tracing.provider`（`TraceConsumer`） | `capabilities.persistence.provider`（把 span 一并落盘） |
 | `skills` 技能 | `capabilities.skills.definition`（`Skill` / `SkillManager` / `active_skills` + `skill/*` 事件词汇） | `capabilities.skills.provider`（`SkillRegistry`） | `capabilities.skills.consumer`（`SystemPromptPlugin`）、`app.assembly`（重放 `skill/*` 事件恢复技能状态） |
-| `permission` 审批 | `miniharness.tools.runtime` 的 `tools/pre-execute` 决策词汇（`allow` / `ask` / `deny`） | `capabilities.permission.provider`（`PermissionPlugin`） | `miniharness.tools.runtime`（按决策决定是否执行工具体） |
+| `permission` 审批 | `miniharness.tools.runtime` 的 `tools/pre-execute` 决策词汇（`allow` / `ask` / `deny`） | `capabilities.permission.provider`（`PermissionPlugin`：拒绝名单 + 审批名单） | `miniharness.tools.runtime`（按决策决定是否执行工具体）、`app.assembly`（对 `run_command` 装 `ask`：无审批者默认拒绝） |
+| `shell` 命令执行 | `capabilities.shell.definition`（argv-only 的调用语义、结果形状 `exit_code` / `stdout` / `stderr`、`DEFAULT_OUTPUT_LIMIT` 与截断标记） | `capabilities.shell.provider`（`ShellTool`：受管范围的第一个真实消费者，不设超时、不终止） | `app.assembly`（注册 `shell` 技能、装审批策略）；工具是 `app.tools` 同类技能的 `run_command` |
 | `final_output` 终结 | `miniharness.loop` 的 `agent/post-tool` 收尾协议 | `capabilities.final_output.provider`（`FinalOutputPlugin`） | `miniharness.loop`（按收尾协议结束本轮） |
 
 每条能力内部的职责说明见各自的 `capabilities/<能力>/__init__.py`。

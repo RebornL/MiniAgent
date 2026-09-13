@@ -14,9 +14,10 @@
 | 文件 | seam | 覆盖 |
 | --- | --- | --- |
 | `tests/support.py` | —— | 集成测试共享的装配 helper（`_assemble` / `_event_types` / `CALC_PARAMS` / `WRITE_PARAMS`），只服务本目录 |
-| `tests/fixtures/legacy-v0-session/` | —— | 仓里一份**真实旧会话的逐字拷贝**（v0 的 `messages.json` + `meta.json` 旁路），供旧会话迁移的回归测试使用；不是用当代 API 现造的新会话 |
-| `tests/test_turn.py` | S2（turn 边界，集成） | 工具体执行与 `tool/result` 按序入日志、deny 的配对完整性、终结工具收尾本轮、持久化 / 追踪消费者接上日志（回合结束后磁盘上就是逐行可读的事件日志）、**只换插件就改变结局而 Loop 零改动** |
+| `tests/fixtures/legacy-v0-session/` | —— | v0 落盘**形态**的样本（`messages.json` + `meta.json` 旁路）：结构与真实旧会话一致，**内容是合成的**（真实会话数据不入库，`agent_sessions/` 在 .gitignore 里、仓库公开） |
+| `tests/test_turn.py` | S2（turn 边界，集成） | 工具体执行与 `tool/result` 按序入日志、deny 的配对完整性、终结工具收尾本轮、持久化 / 追踪消费者接上日志（回合结束后磁盘上就是逐行可读的事件日志）、三个语义检查点在下一步之前已落盘且失败即 fail-closed、**只换插件就改变结局而 Loop 零改动** |
 | `tests/test_capabilities.py` | S2 + 契约等价 | 压缩达同样阈值才触发且摘要语义与契约包逐字一致；终结工具不再采样 |
+| `tests/test_shell.py` | 进程边界（真实子进程）+ S2（装配） | `run_command`：真实子进程的输出与退出码、参数不经 shell 原样送达、`cwd` 生效、真实洪泛输出被截断、命令跑在受管范围里且可被外部终止、被拒时工具体未执行、装配层默认不装载 `shell` 技能且对 `run_command` 默认拒绝 |
 | `tests/test_app.py` | S2（装配） | `build_harness` 的工具懒注册与落盘、技能装载、`resume_session` 只靠重放日志恢复（压缩后的投影逐字一致、技能状态与领域提示仍在、`meta.json` 无 summary/active_skills 旁路）、真实 v0 旧会话迁移后技能工具已注册且摘要链非空、`meta.json` 不存模型可见内容的拷贝、全新 clone 上 `import app` 不读 config.json |
 
 ## 运行

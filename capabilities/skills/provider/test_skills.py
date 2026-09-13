@@ -58,6 +58,30 @@ def test_skill_registry_load_is_reversible():
     assert runtime.get("load_skill") is None and runtime.get("unload_skill") is None
 
 
+def test_the_meta_tools_advertise_the_available_and_loaded_skills():
+    """F2：模型只看得见 meta 工具时也能发现技能——描述里列出可用 / 已加载的技能名。
+
+    默认不装载的技能（如装配层的 `shell`）既不在 base prompt 里点名，装载前也不注入自己的
+    提示，所以「可用技能」只能从 `load_skill` 的描述里发现（legacy `{available_skills}` 行为）。
+    """
+    registry = SkillRegistry()
+    registry.register(_math_skill())
+    ctx, runtime = _pipeline(registry)
+
+    def descriptions() -> dict[str, str]:
+        return {spec["function"]["name"]: spec["function"]["description"]
+                for spec in runtime.specs()}
+
+    assert "math" in descriptions()["load_skill"]         # 未装载，但点得到
+    assert "math" not in descriptions()["unload_skill"]   # 可卸载的是「已加载」集，不是目录
+
+    registry.load("math")
+
+    assert "math" in descriptions()["unload_skill"]       # 装载后：可卸载
+    registry.unload("math")
+    assert "math" not in descriptions()["unload_skill"]   # 卸载后：刷新回未加载
+
+
 def test_skill_state_is_rebuilt_from_the_log_alone():
     """装载/卸载是一等事件：新 registry 只折叠同一份日志就能重建工具注册与领域提示。"""
     registry = SkillRegistry()

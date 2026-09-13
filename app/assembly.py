@@ -5,16 +5,20 @@
 磁盘上没有第二份模型可见状态。
 
 策略全挂在事件 seam 上（Loop 零改动）：压缩 → `agent/pre-step`，重试 / 超时 → `tools/execute`，
-输出校验 → `tools/post-execute`，终结工具 → `agent/post-tool`，持久化 / 追踪 → Session 日志订阅。
+审批 → `tools/pre-execute`（只对 `run_command`），输出校验 → `tools/post-execute`，
+终结工具 → `agent/post-tool`，持久化 / 追踪 → Session 日志订阅。
 """
 from openai import OpenAI
 
 from app import config, tools
 from capabilities.compaction.provider import CompactionPlugin
 from capabilities.final_output.provider import FinalOutputPlugin
+from capabilities.permission.provider import PermissionPlugin
 from capabilities.persistence.definition import PersistenceManager, Store
 from capabilities.persistence.provider import PersistenceConsumer
 from capabilities.retry.provider import RetryPlugin
+from capabilities.shell.definition import RUN_COMMAND_TOOL
+from capabilities.shell.provider import ShellTool
 from capabilities.skills.consumer import SystemPromptPlugin
 from capabilities.skills.definition import Skill
 from capabilities.skills.provider import SkillRegistry
@@ -27,10 +31,15 @@ from miniharness.loop import Loop
 from miniharness.session import Session
 from miniharness.tools.runtime import ToolRuntime
 from providers.deepseek import DeepSeekProvider
+from providers.process import SubprocessSeam
 
 
-def register_skills(skills: SkillRegistry) -> None:
-    """注册 4 个技能：装载即把技能工具挂进 ToolRuntime（可逆），卸载即撤销。"""
+def register_skills(skills: SkillRegistry, shell: ShellTool) -> None:
+    """注册 5 个技能：装载即把技能工具挂进 ToolRuntime（可逆），卸载即撤销。
+
+    `shell` 技能的工具要 `shell` 实例本身（`run_command` 是它的方法）；其余技能的工具
+    都是 `app.tools` 里的纯函数。
+    """
     skills.register(Skill(
         name="web-search",
         description="互联网搜索能力",
@@ -67,6 +76,18 @@ def register_skills(skills: SkillRegistry) -> None:
         ),
     ))
 
+    skills.register(Skill(
+        name="shell",
+        description="在受管范围里执行外部命令",
+        tools=[RUN_COMMAND_TOOL],
+        tool_map={"run_command": shell.run_command},
+        system_prompt=(
+            "你可以执行外部命令。命令必须以 argv 列表逐项给出（不经 shell），"
+            '例如 ["git", "status"]；不要拼 shell 字符串。'
+            "命令需要人工批准，被拒绝时不要重试。"
+        ),
+    ))
+
 
 # ─── 3. 装配 miniharness ─────────────────────────
 def build_harness(
@@ -85,7 +106,8 @@ def build_harness(
     终结工具 → `agent/post-tool`，持久化/追踪 → Session 日志订阅。
     工具不预注册：只随技能装载经 `SkillRegistry` 可逆注册（`unload_skill` 即撤销），
     与 legacy `get_active_tools()`（meta tools + 仅已激活技能的工具）一致。
-    不装 PermissionPlugin——legacy 没有审批，装了会改变行为。
+    审批策略只覆盖 `run_command`（`ask`；没有审批者时默认拒绝，工具体不执行），其余工具的
+    行为与 legacy 一致——legacy 没有审批概念，只有真正执行外部命令的工具需要这道门槛。
     """
     ctx = Context()
     session = Session()
@@ -95,17 +117,22 @@ def build_harness(
     ctx.load(loop)                    # 依赖未就绪 → 挂起，provider/工具齐后自动激活
     ctx.load(ToolRuntime())
     ctx.load(llm if llm is not None else _default_llm(client, model))
+    ctx.load(SubprocessSeam())        # 受管范围后端：shell 技能的执行地基
 
     ctx.load(CompactionPlugin())
     ctx.load(RetryPlugin())
     ctx.load(ToolTimeoutPlugin())
     ctx.load(ValidationPlugin())
+    ctx.load(PermissionPlugin(approval_required={"run_command"}))
     ctx.load(FinalOutputPlugin(tools.OUTPUT_TOOL_NAMES))
     ctx.load(PersistenceConsumer(PersistenceManager(Store(store_dir)), session_id))
     ctx.load(TraceConsumer())
 
+    shell = ShellTool()
+    ctx.load(shell)                   # 提供 run_command；工具本身随 shell 技能装载才可见
+
     skills = SkillRegistry()
-    register_skills(skills)
+    register_skills(skills, shell)
     ctx.load(skills)
     ctx.load(SystemPromptPlugin(base_system_prompt))
 

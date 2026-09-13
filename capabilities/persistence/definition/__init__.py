@@ -141,12 +141,17 @@ def _fold_legacy_meta(meta: dict, records: list[dict]) -> list[dict]:
 def read_log(path: Path) -> tuple[int, list[dict]]:
     """读一份日志，返回 `(格式版本, 事件记录)`；版本取自 header（权威），不翻译、不改写。
 
-    首行必须是 header；完整记录的行必然以 `\\n` 结尾，所以崩溃写残的**最后一行**
-    允许解析失败并被丢弃（它不是一条已落盘的完整事件），中间的坏行是真损坏，直接报错。
+    首行必须是 header；完整记录的行必然以 `\\n` 结尾，所以**缺结尾换行的最后一行**是崩溃
+    写残的（它不是一条已落盘的完整事件），整行丢弃——这与写前的 `_drop_torn_tail` 是同一
+    判定。两者若不一致，冷启动读出的水位就会高于盘上的真实形状（那条事件将再也补不回来）。
+    缺结尾换行之外的坏行是真损坏，直接报错。
     """
-    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    data = path.read_bytes()
+    if data and not data.endswith(b"\n"):        # 与 `_drop_torn_tail` 同一判定：写残的尾行
+        data = data[:data.rfind(b"\n") + 1]
+    lines = [line for line in data.decode("utf-8").splitlines() if line.strip()]
     if not lines:
-        raise ValueError(f"日志 {path.name} 为空：缺少 header")
+        raise ValueError(f"日志 {path.name} 缺少完整 header（空文件或写残的 header）")
     try:
         header = json.loads(lines[0])
     except json.JSONDecodeError as exc:
@@ -161,10 +166,9 @@ def read_log(path: Path) -> tuple[int, list[dict]]:
     for number, line in enumerate(lines[1:], start=2):
         try:
             records.append(json.loads(line))
-        except json.JSONDecodeError:
-            if number == len(lines):     # 写残的最后一行：未落盘的完整事件，丢弃
-                break
-            raise ValueError(f"日志 {path.name} 第 {number} 行损坏") from None
+        except json.JSONDecodeError as exc:
+            # 写残的尾行已在上面整行丢弃，能走到这里的都是真损坏
+            raise ValueError(f"日志 {path.name} 第 {number} 行损坏：{exc}") from None
     return version, records
 
 
@@ -254,7 +258,8 @@ class Store:
         覆盖更高版本的历史）；当代日志若没有完整可解析的 header（首个 flush 落盘到一半
         就崩了），整份视同没落过盘并重写 header。首次写入补 header，并把本会话的旧格式
         记录标记为已迁移（改名不删档）；写入后 fsync：返回时事件确在盘上。写残的尾行在
-        写前修掉，不留半条记录。
+        写前修掉，不留半条记录。写失败时先修掉写残的尾行、再作废水位缓存：盘上可能只落了
+        半批，下一次写入重读盘上的水位，只补真正缺的部分（不重复追加、也不丢未落盘项）。
         """
         self._refuse_newer_generation(session_id)
         watermark = self._watermark(session_id)
@@ -267,16 +272,23 @@ class Store:
             mode = "a"
             _drop_torn_tail(path)      # 写残的尾行不是已落盘的事件，写前修掉
 
-        with open(path, mode, encoding="utf-8") as f:
-            if fresh:
-                header = {"format": LOG_FORMAT, "version": LOG_VERSION,
-                          "session_id": session_id,
-                          "created": created or time.strftime("%Y-%m-%d %H:%M:%S")}
-                f.write(json.dumps(header, ensure_ascii=False) + "\n")
-            for event in pending:
-                f.write(json.dumps(event, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        try:
+            with open(path, mode, encoding="utf-8") as f:
+                if fresh:
+                    header = {"format": LOG_FORMAT, "version": LOG_VERSION,
+                              "session_id": session_id,
+                              "created": created or time.strftime("%Y-%m-%d %H:%M:%S")}
+                    f.write(json.dumps(header, ensure_ascii=False) + "\n")
+                for event in pending:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            # 半批落盘 / 中断：先修掉写残的尾行再作废水位缓存——残行不算已落盘的事件，
+            # 留在盘上会让重读出的水位高过盘上的真实记录，那条事件就再也补不回来了。
+            _drop_torn_tail(path)
+            self._written.pop(session_id, None)
+            raise
 
         if pending:
             self._written[session_id] = max(pending[-1]["seq"], watermark)
@@ -383,8 +395,11 @@ def _version_of(path: Path) -> int:
 
 
 def _drop_torn_tail(path: Path) -> None:
-    """写前修掉写残的尾行：完整记录必然以 `\\n` 结尾，没结尾的那段不是已落盘的事件。"""
-    if path.stat().st_size == 0:
+    """写前修掉写残的尾行：完整记录必然以 `\\n` 结尾，没结尾的那段不是已落盘的事件。
+
+    文件不存在（还没落过盘，或失败发生在建文件之前）就无事可做。
+    """
+    if not path.exists() or path.stat().st_size == 0:
         return
     with open(path, "rb") as f:
         f.seek(-1, os.SEEK_END)

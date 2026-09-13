@@ -1,7 +1,8 @@
 """loop —— 零策略的循环（消费方）。
 
-`Loop` 只做「驱动 + 派发事件」：取输入 → `agent/pre-step` → llm seam → tools 管线 → 落日志。
-它是会话、工具、LLM 三个契约的**消费方**——只依赖契约，不认识任何策略与后端。
+`Loop` 只做「驱动 + 派发事件」：取输入 → `agent/pre-step` → 语义检查点 → llm seam
+→ 语义检查点 → tools 管线 → 落日志。它是会话、工具、LLM 三个契约的**消费方**——
+只依赖契约，不认识任何策略与后端。
 
 权限 / 超时 / 重试 / 压缩 / 终结 / 持久化全部是订阅事件的插件（见 `capabilities/`）。
 """
@@ -13,7 +14,17 @@ from miniharness.session import Session
 from miniharness.tools.contract import DENIED
 from miniharness.tools.runtime import ToolRuntime
 
-__all__ = ["Loop"]
+__all__ = ["Loop", "CHECKPOINT_STEP", "CHECKPOINT_MODEL", "CHECKPOINT_TOOL"]
+
+#: 语义检查点：`agent/checkpoint` 事件的 `point` 取值。
+#:
+#: 循环在**向外产生副作用或依赖历史之前**发出它——向外发起模型请求、派发工具、以及
+#: 每步开始前。发出即让订阅者（检查点策略，见 `capabilities.persistence.provider`）
+#: 把历史固定下来；订阅者抛错就让下游副作用不发生（fail-closed）。默认没有任何订阅者，
+#: 检查点是空操作；`Loop` 自己不认识也不解释这些点。
+CHECKPOINT_STEP = "step"      # 每步开始前
+CHECKPOINT_MODEL = "model"    # 向模型发起请求前
+CHECKPOINT_TOOL = "tool"      # 顶层工具派发前
 
 
 class Loop(Plugin):
@@ -26,6 +37,10 @@ class Loop(Plugin):
     只有 `denied` 另落 `tool/denied`——工具体没执行，没有权威结果，也不派发 `agent/post-tool`。
 
     循环体内没有任何权限、超时、重试、压缩判断——它们都是 `ctx.on(...)` 订阅者。
+
+    在每步开始前、向模型发起请求前、顶层工具派发前各派发一次 `agent/checkpoint`
+    （`point` 取 `CHECKPOINT_*`）：检查点策略在此把历史固定下来，订阅者抛错即中止本轮
+    （fail-closed）——副作用不会发生在未固定的历史之上。
     """
 
     inject = ("session", "tools", "llm")
@@ -50,7 +65,12 @@ class Loop(Plugin):
             return step.get("reason", "(已拒绝)")
         session.append("user/message", content=user_input)
 
-        for _ in range(max_steps):
+        for step in range(max_steps):
+            # 每步开始前 + 向模型发起请求前的检查点：请求依赖历史，先把历史固定下来
+            ctx.emit("agent/checkpoint",
+                     {"point": CHECKPOINT_STEP, "step": step, "session": session})
+            ctx.emit("agent/checkpoint",
+                     {"point": CHECKPOINT_MODEL, "step": step, "session": session})
             reply = llm.complete(session.derive_messages())   # 只依赖 llm seam
             text = reply.get("text") or ""
             calls = list(reply.get("tool_calls") or [])
@@ -66,6 +86,10 @@ class Loop(Plugin):
             answer: str | None = None
             denial: str | None = None
             for call in calls:
+                # 顶层工具派发前的检查点：工具体会产生副作用，先把这次的调用固定下来
+                ctx.emit("agent/checkpoint",
+                         {"point": CHECKPOINT_TOOL, "step": step, "call": call,
+                          "session": session})
                 result = tools.run(call)                      # 只依赖 tools seam
                 if result["status"] == DENIED:
                     # 被拒 → 工具体没执行、没有权威结果：不写 tool/result，但仍需落配对事件

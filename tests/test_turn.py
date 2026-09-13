@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+
+import pytest
 
 from capabilities.final_output.provider import FinalOutputPlugin
 from capabilities.permission.provider import PermissionPlugin
@@ -20,7 +23,12 @@ from capabilities.persistence.definition import (
 from capabilities.persistence.provider import PersistenceConsumer
 from capabilities.timeout.provider import ToolTimeoutPlugin
 from capabilities.tracing.provider import TraceConsumer
-from miniharness.loop import Loop
+from miniharness.loop import (
+    CHECKPOINT_MODEL,
+    CHECKPOINT_STEP,
+    CHECKPOINT_TOOL,
+    Loop,
+)
 from miniharness.session import Session
 from miniharness.session.test_projection import _event_types
 from miniharness.tools.contract import ToolDefinition
@@ -221,3 +229,81 @@ def test_policy_plugin_changes_turn_outcome_without_changing_loop():
     assert timed_result["status"] == "timed_out"
     assert "超时" in timed_result["content"]
     assert timed_answer != plain_answer
+
+
+# ═══════════════ T4：语义检查点（写盘屏障） ═══════════════
+def _failing_fsync(fd: int) -> None:
+    raise OSError("磁盘写失败")
+
+
+def _persisted_harness(tmp_path, ran: list[dict]):
+    """装配一个带持久化消费者与一个真实工具的 harness（检查点测试共用）。"""
+    persistence = PersistenceConsumer(
+        PersistenceManager(Store(str(tmp_path))), session_id="s1")
+    llm = _scripted("double", {"n": 21}, "42")
+    ctx, session, loop, _ = _assemble(
+        llm, plugins=[persistence],
+        tools=[ToolDefinition("double", "翻倍", {"n": {"type": "integer"}},
+                              lambda args: ran.append(args) or args["n"] * 2)])
+    return ctx, session, loop, persistence, llm
+
+
+def test_each_semantic_checkpoint_commits_the_log_before_the_next_action(tmp_path):
+    """三个检查点都在下游动作之前完成落盘：轮到策略时历史已在盘上。
+
+    监听器按注册顺序在持久化之后收到检查点——轮到它时该检查点的屏障已经返回，
+    `agent/checkpoint` 因此在每个语义点都可观察「已落盘」。
+    """
+    ctx, session, loop, _, _ = _persisted_harness(tmp_path, [])
+    committed: list[str] = []
+
+    def observe(payload: dict) -> None:
+        durable = PersistenceManager(Store(str(tmp_path))).load_events("s1") == session.events
+        committed.append(f"{payload['point']}:{'已落盘' if durable else '未落盘'}")
+
+    ctx.on("agent/checkpoint", observe)
+
+    loop.turn("把 21 翻倍")
+
+    assert committed == [
+        f"{CHECKPOINT_STEP}:已落盘",      # 第一步开始前：turn/start + user/message 已固定
+        f"{CHECKPOINT_MODEL}:已落盘",     # 向模型发起请求前
+        f"{CHECKPOINT_TOOL}:已落盘",      # 顶层工具派发前：带 tool_call 的 assistant 已固定
+        f"{CHECKPOINT_STEP}:已落盘",      # 第二步开始前：tool/result 已固定
+        f"{CHECKPOINT_MODEL}:已落盘",
+    ]
+
+
+def test_a_failed_checkpoint_blocks_the_model_request(tmp_path, monkeypatch):
+    """检查点 fail-closed：屏障失败就不发起模型请求，也不派发工具。"""
+    ran: list[dict] = []
+    _, _, loop, _, llm = _persisted_harness(tmp_path, ran)
+
+    monkeypatch.setattr(os, "fsync", _failing_fsync)
+    with pytest.raises(OSError):
+        loop.turn("把 21 翻倍")
+
+    assert llm.calls == []            # 每步开始前的检查点失败：采样没发生
+    assert ran == []                  # 工具体也没派发
+
+
+def test_a_failed_tool_checkpoint_blocks_tool_dispatch(tmp_path, monkeypatch):
+    """顶层工具派发前的检查点失败：模型请求已发生，但工具体不执行（副作用不发生）。"""
+    ran: list[dict] = []
+    _, _, loop, _, llm = _persisted_harness(tmp_path, ran)
+
+    real_fsync = os.fsync
+    seen = {"n": 0}
+
+    def fail_after_first(fd: int) -> None:
+        seen["n"] += 1
+        if seen["n"] > 1:
+            raise OSError("磁盘写失败")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_after_first)
+    with pytest.raises(OSError):
+        loop.turn("把 21 翻倍")
+
+    assert len(llm.calls) == 1        # 前两个检查点已过，模型请求发生过
+    assert ran == []                  # 工具派发前的检查点失败：工具体没执行
