@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import time
 
 from miniharness import (
@@ -20,7 +21,7 @@ from miniharness import (
     ToolDefinition,
     ToolRuntime,
 )
-from miniharness_plugins import ToolTimeoutPlugin
+from miniharness_plugins import FinalOutputPlugin, ToolTimeoutPlugin
 
 CALC_PARAMS = {"expression": {"type": "string"}}
 WRITE_PARAMS = {"path": {"type": "string"}, "content": {"type": "string"}}
@@ -97,6 +98,69 @@ def test_permission_plugin_denies_and_tool_result_is_not_logged():
         "role": "tool", "content": answer, "tool_call_id": "call_1"}
 
 
+def test_turn_finishes_the_whole_batch_before_a_terminal_tool_ends_it():
+    """终结工具与普通工具同批：两个都执行且都配对，答复取终结工具的 content。"""
+    ran: list[dict] = []
+
+    def calculate(args: dict) -> str:
+        ran.append(args)
+        return "32"
+
+    def final_output(args: dict) -> str:
+        return json.dumps({"result": args["result"]}, ensure_ascii=False)
+
+    llm = MockLLM()
+    llm.script.append({"text": "", "tool_calls": [
+        {"id": "c1", "name": "final_output", "args": {"result": {"n": 32}}},
+        {"id": "c2", "name": "calculate", "args": {"expression": "16 * 2"}},
+    ]})
+    _, session, loop, _ = _assemble(
+        llm,
+        plugins=[FinalOutputPlugin({"final_output"})],
+        tools=[ToolDefinition("calculate", "算数", CALC_PARAMS, calculate),
+               ToolDefinition("final_output", "终结", {}, final_output)],
+    )
+
+    answer = loop.turn("算 16*2 并输出")
+
+    assert answer == final_output({"result": {"n": 32}})   # 终结工具的 content 即本轮答复
+    assert ran == [{"expression": "16 * 2"}]               # 排在终结工具之后的普通工具也没被丢弃
+    results = [e for e in session.events if e["type"] == "tool/result"]
+    assert sorted(e["call_id"] for e in results) == ["c1", "c2"]   # 同批 tool_calls 全部配对
+    assert [m["tool_call_id"] for m in session.derive_messages()
+            if m["role"] == "tool"] == ["c1", "c2"]
+    assert len(llm.calls) == 1                             # 终结后不再采样
+
+
+def test_turn_pairing_survives_a_denial_earlier_in_the_same_batch():
+    """被拒的调用不能中止本批：后续 tool_call 照常执行且全部配对。"""
+    ran: list[dict] = []
+    llm = MockLLM()
+    llm.script.append({"text": "", "tool_calls": [
+        {"id": "c1", "name": "write_file", "args": {"path": "x.txt", "content": "y"}},
+        {"id": "c2", "name": "calculate", "args": {"expression": "1 + 1"}},
+    ]})
+    _, session, loop, _ = _assemble(
+        llm,
+        plugins=[PermissionPlugin(denied={"write_file"})],
+        tools=[ToolDefinition("write_file", "写文件", WRITE_PARAMS,
+                              lambda a: ran.append(a) or "written"),
+               ToolDefinition("calculate", "算数", CALC_PARAMS,
+                              lambda a: ran.append(a) or "2")],
+    )
+
+    answer = loop.turn("写文件再算 1+1")
+
+    assert "write_file" in answer                          # 本轮以首个拒绝原因收尾
+    assert ran == [{"expression": "1 + 1"}]                # 被拒的工具体没执行，后面的执行了
+    assert [(e["type"], e["call_id"]) for e in session.events
+            if e["type"] in ("tool/result", "tool/denied")] == [
+        ("tool/denied", "c1"), ("tool/result", "c2")]
+    # 模型可见历史里两个 tool_call 都配上了 role=tool
+    assert [m["tool_call_id"] for m in session.derive_messages() if m["role"] == "tool"] == ["c1", "c2"]
+    assert len(llm.calls) == 1                             # 拒绝后不再采样
+
+
 def test_policy_plugin_changes_turn_outcome_without_changing_loop():
     """同一个 Loop，只换装配的插件，turn 的可观察结局不同。"""
 
@@ -117,12 +181,13 @@ def test_policy_plugin_changes_turn_outcome_without_changing_loop():
     timed_answer, timed_log = run_turn([ToolTimeoutPlugin(default_ms=50)])
 
     assert plain_answer == "最终观察: 慢工具完成"
-    # CallFunc.call_with_timeout 的 legacy 语义：超时不抛异常，而是返回提示字符串
-    assert timed_answer == "最终观察: 工具执行超时（0.05秒），已取消执行"
     (plain_result,) = [e for e in plain_log if e["type"] == "tool/result"]
     (timed_result,) = [e for e in timed_log if e["type"] == "tool/result"]
-    assert plain_result["status"] == "ok" and timed_result["status"] == "ok"
-    assert plain_result["content"] == "慢工具完成" and "工具执行超时" in timed_result["content"]
+    # 超时必须与成功可区分：权威结果是 error，而不是把超时伪装成 ok 的字符串
+    assert plain_result["status"] == "ok"
+    assert timed_result["status"] == "error"
+    assert "超时" in timed_result["content"]
+    assert timed_answer != plain_answer
 
 
 # ═══════════════ S3 辅助 seam（契约）：工具执行流水线 ═══════════════
@@ -217,6 +282,44 @@ def test_derive_messages_is_deterministic_and_only_model_visible():
 
     assert tail[0]["tool_calls"][0]["name"] == "calculate"
     assert tail[1] == {"role": "tool", "content": "2", "tool_call_id": "c1"}
+
+
+def test_derive_messages_keeps_only_the_latest_system_prompt():
+    """system prompt 是状态不是历史：多条 system/message 只投影最后一条，且恒置最前。
+
+    中位 system 消息会被部分 OpenAI 兼容接口拒绝；legacy 也恒为「开头单条 system」。
+    """
+    session = Session()
+    session.append("system/message", content="旧提示")
+    session.append("user/message", content="你好")
+    session.append("assistant/message", content="在的")
+    session.append("system/message", content="新提示（含技能）")   # 技能装载后刷新
+    session.append("user/message", content="再问")
+
+    messages = session.derive_messages()
+
+    assert messages[0] == {"role": "system", "content": "新提示（含技能）"}
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert not any(m["content"] == "旧提示" for m in messages)
+
+
+def test_session_from_messages_round_trips_model_visible_history():
+    """`session_from_messages` 是 `derive_messages` 的逆（恢复持久化会话的路径）。"""
+    messages = [
+        {"role": "system", "content": "你是助手"},
+        {"role": "user", "content": "16 * 2 是多少"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_1", "name": "calculate", "args": {"expression": "16 * 2"}}]},
+        {"role": "tool", "content": "32", "tool_call_id": "call_1"},
+        {"role": "assistant", "content": "16 * 2 = 32"},
+    ]
+
+    session = Session.session_from_messages(messages)
+
+    assert session.derive_messages() == messages          # 往返等价（含 tool_calls 与 role=tool）
+    assert _event_types(session) == [
+        "system/message", "user/message", "assistant/message", "tool/result", "assistant/message",
+    ]
 
 
 def test_compaction_is_surface_replacement_and_log_rebuilds_history():

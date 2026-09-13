@@ -37,26 +37,30 @@ class AgentTracer:
         self.runs.append(span)
         return span
 
-    def log_llm_call(self, messages: list, response, duration: float) -> Span:
-        span = Span(
+    def log_llm_call(
+        self,
+        messages: list,
+        *,
+        content: str = "",
+        tool_calls: list | None = None,
+        tokens_used: int = 0,
+        duration: float = 0.0,
+    ) -> Span:
+        """记录一次 LLM 调用（provider 无关）。
+
+        只接收已归一化的纯数据，不接触任何 SDK 的响应对象——对 provider 的耦合留在
+        产生这些值的那一层（provider 适配器），不渗进追踪器与它的消费者。
+        """
+        end = time.time()
+        return Span(
             span_id=f"llm_{uuid.uuid4().hex[:8]}",
             type="llm_call",
-            start_time=time.time() - duration,
-            end_time=time.time(),
+            start_time=end - duration,
+            end_time=end,
             input={"message_count": len(messages)},
-            output={
-                "content": response.choices[0].message.content,
-                "tool_calls": [
-                    {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    }
-                    for tc in (response.choices[0].message.tool_calls or [])
-                ],
-            },
-            tokens_used=response.usage.total_tokens if response.usage else 0,
+            output={"content": content, "tool_calls": list(tool_calls or [])},
+            tokens_used=tokens_used,
         )
-        return span
 
     def log_tool_call(self, name: str, args: dict, result: str, duration: float) -> Span:
         span = Span(

@@ -9,20 +9,21 @@ Story 15「行为不变」在每个插件上都与既有模块的直接调用结
 """
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 
 import pytest
 
-import CallFunc
 import Compaction
 import Persistence
 import RetryFunc
 import SkillManager
 import Structure
-from miniharness import Context, Session, ToolDefinition, ToolRuntime
+from miniharness import Context, MockLLM, Session, ToolDefinition, ToolRuntime
 from miniharness_plugins import (
     CompactionPlugin,
+    FinalOutputPlugin,
     PersistenceConsumer,
     RetryPlugin,
     SkillRegistry,
@@ -30,7 +31,7 @@ from miniharness_plugins import (
     TraceConsumer,
     ValidationPlugin,
 )
-from test_miniharness import _assemble
+from test_miniharness import CALC_PARAMS, _assemble, _event_types
 
 LONG = "这是第一段很长的历史对话内容，用来把 token 数推过阈值。" * 6
 
@@ -157,6 +158,36 @@ def _scripted(tool_name: str, args: dict, text: str):
     return MockLLM().then_tool_call(tool_name, args).then_text(text)
 
 
+def test_final_output_plugin_ends_turn_at_terminal_tool():
+    """声明式终结工具：本轮以它的 content 结束，且不再采样（Loop 零改动）。"""
+    llm = (MockLLM()
+           .then_tool_call("final_output", {"result": {"answer": 42}, "summary": "42"})
+           .then_text("不应走到这一步"))
+    _, session, loop, _ = _assemble(
+        llm,
+        plugins=[FinalOutputPlugin(terminal_tools={"final_output"})],
+        tools=[ToolDefinition("final_output", "输出最终答案", {},
+                              lambda args: json.dumps(args, ensure_ascii=False))],
+    )
+
+    answer = loop.turn("输出结构化答案")
+
+    assert json.loads(answer) == {"result": {"answer": 42}, "summary": "42"}
+    assert len(llm.calls) == 1                             # 终结后不再采样
+    assert _event_types(session)[-2:] == ["tool/result", "turn/end"]
+
+    # 非终结工具不会被误判为终结：同一插件下普通工具照旧继续采样
+    llm2 = MockLLM().then_tool_call("calculate", {"expression": "1 + 1"}).then_text("1 + 1 = 2")
+    _, _, loop2, _ = _assemble(
+        llm2,
+        plugins=[FinalOutputPlugin(terminal_tools={"final_output"})],
+        tools=[ToolDefinition("calculate", "算数", CALC_PARAMS, lambda args: "2")],
+    )
+
+    assert loop2.turn("算 1+1") == "1 + 1 = 2"
+    assert len(llm2.calls) == 2
+
+
 # ═══════════════ S3 辅助 seam（契约）：工具执行流水线 ═══════════════
 def _pipeline(plugin, *tools: ToolDefinition) -> tuple[Context, ToolRuntime]:
     ctx = Context()
@@ -249,7 +280,8 @@ def test_retry_plugin_matches_with_retry_semantics():
     assert len(legacy_tries) == len(harness_tries) == 3
 
 
-def test_timeout_plugin_reuses_call_with_timeout_output():
+def test_timeout_plugin_reports_timeout_as_error():
+    """用户裁定的 Story 15 例外：超时不报 ok，必须与成功可区分。"""
     def slow(args: dict) -> str:
         time.sleep(0.2)
         return "慢"
@@ -258,9 +290,14 @@ def test_timeout_plugin_reuses_call_with_timeout_output():
                            ToolDefinition("slow", "", {}, slow, timeoutMs=50))
     result = runtime.run({"id": "c1", "name": "slow", "args": {}})
 
-    # 逐字一致：legacy 的 call_with_timeout 对同一函数、同一超时的返回
-    assert result["content"] == CallFunc.call_with_timeout(lambda: slow({}), timeout=0.05)
-    assert result["status"] == "ok"
+    assert result["status"] == "error"
+    assert "超时" in result["error"] and result["content"] == result["error"]
+
+    # 未超时的调用不受影响，仍是 ok
+    _, ok_runtime = _pipeline(ToolTimeoutPlugin(default_ms=1000),
+                              ToolDefinition("fast", "", {}, lambda a: "快", timeoutMs=1000))
+    ok = ok_runtime.run({"id": "c2", "name": "fast", "args": {}})
+    assert ok["status"] == "ok" and ok["content"] == "快"
 
 
 def test_validation_plugin_reuses_structure_semantics():

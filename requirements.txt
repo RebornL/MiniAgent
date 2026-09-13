@@ -1,0 +1,7 @@
+# 运行依赖
+openai>=1.0
+tiktoken>=0.5
+jsonschema>=4.0
+
+# 测试
+pytest>=7.0

@@ -8,18 +8,22 @@
     ctx.maybe_compact(...)            CompactionPlugin    → agent/pre-step（surface 替换）
     with_retry(...)                   RetryPlugin         → tools/execute（around）
     call_with_timeout(...)            ToolTimeoutPlugin   → tools/execute（around）
+                                       ↑ 有意偏离：超时改抛 ToolTimeout，不再伪装成 ok 字符串
     Structure 校验 / sanitize         ValidationPlugin    → tools/post-execute
-    pm.save_messages(...)             PersistenceConsumer → Session 日志订阅
+    final_output 即返回（内联）         FinalOutputPlugin   → agent/post-tool（声明式终结工具）
+    pm.save_session(...)              PersistenceConsumer → Session 日志订阅
     tracer.*(...)                     TraceConsumer       → Session 日志订阅
     skills.load/unload + 工具注册      SkillRegistry       → ToolRuntime 可逆注册
 
-**全部只订阅 miniharness 事件，Loop 零改动，既有模块零改动。**
+**全部只订阅 miniharness 事件，Loop 零改动。** 唯一的结构性改动：`AgentTrace.log_llm_call`
+只接收已归一化的纯数据（不再吃 SDK 响应对象），把 SDK 形状的耦合从追踪器里移除。
 """
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
-from typing import Any, Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeout
+from typing import Any, Callable, Iterable
 
 import AgentTrace
 import CallFunc
@@ -34,11 +38,14 @@ __all__ = [
     "stub_summarizer",
     "CompactionPlugin",
     "RetryPlugin",
+    "ToolTimeout",
     "ToolTimeoutPlugin",
     "ValidationPlugin",
     "PersistenceConsumer",
     "TraceConsumer",
     "SkillRegistry",
+    "FinalOutputPlugin",
+    "SystemPromptPlugin",
 ]
 
 
@@ -77,7 +84,13 @@ class CompactionPlugin(Plugin):
 
     def apply(self, ctx: Context) -> None:
         self._session: Session = ctx.get("session")
+        ctx.provide("compaction", self)      # 供持久化消费者读取当前摘要
         ctx.on("agent/pre-step", self._pre)
+
+    @property
+    def summary(self) -> str:
+        """当前增量摘要（`Persistence.save_session` 恢复/保存时需要）。"""
+        return self.context.summary
 
     def _pre(self, payload: dict, next_: Callable[[], Any]) -> dict:
         self.compact_if_needed()
@@ -142,11 +155,16 @@ class RetryPlugin(Plugin):
 
 
 # ═══════════════ 耐用性：超时 → tools/execute ═══════════════
-class ToolTimeoutPlugin(Plugin):
-    """超时护栏：订阅 `tools/execute`（around），复用 `CallFunc.call_with_timeout`。
+class ToolTimeout(RuntimeError):
+    """工具执行超时（由 `ToolTimeoutPlugin` 抛出，`ToolRuntime` 收敛为结构化 error）。"""
 
-    保留 legacy 语义：超时/异常不抛出，而是返回提示字符串作为工具结果
-    （`工具执行超时（N秒）` / `工具执行错误: ...`）。工具可用 `timeoutMs` 覆盖默认值。
+
+class ToolTimeoutPlugin(Plugin):
+    """超时护栏：订阅 `tools/execute`（around），超时即抛 `ToolTimeout`。
+
+    与 legacy `CallFunc.call_with_timeout` 的**有意差别**（用户裁定）：超时不再伪装成
+    一个 `ok` 的字符串结果，而是抛出异常，让权威结果明确是 `error`，下游可按 status 区分
+    「超时」与「成功」。默认超时沿用 `CallFunc.DEFAULT_TOOL_TIMEOUT`；工具可用 `timeoutMs` 覆盖。
     """
 
     inject = ("tools",)
@@ -157,9 +175,18 @@ class ToolTimeoutPlugin(Plugin):
     def apply(self, ctx: Context) -> None:
         ctx.on("tools/execute", self._wrap)
 
-    def _wrap(self, payload: dict, next_: Callable[[], Any]) -> str:
+    def _wrap(self, payload: dict, next_: Callable[[], Any]) -> Any:
         timeout_ms = payload.get("timeoutMs") or self.default_ms
-        return CallFunc.call_with_timeout(next_, timeout=timeout_ms / 1000)
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(next_)
+            return future.result(timeout=timeout_ms / 1000)
+        except _FutureTimeout:
+            raise ToolTimeout(
+                f"工具 {payload['call'].get('name')} 执行超时（{timeout_ms}ms 未返回）"
+            ) from None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
 
 # ═══════════════ 输出校验：Structure → tools/post-execute ═══════════════
@@ -192,31 +219,72 @@ class ValidationPlugin(Plugin):
         return {**result, "value": value}
 
 
+# ═══════════════ 终结行为：FinalOutput → agent/post-tool ═══════════════
+class FinalOutputPlugin(Plugin):
+    """声明式终结工具：某工具执行成功即可作为本轮最终答复（Loop 零改动）。
+
+    订阅 `agent/post-tool`：刚执行的工具名在 `terminal_tools` 内且权威结果为 `ok` 时，
+    以它的 `content` 短路本轮（不再采样）；否则交给后继监听者（`next_()`）。
+    """
+
+    inject = ("tools",)
+
+    def __init__(self, terminal_tools: Iterable[str] = ("final_output",)) -> None:
+        self.terminal_tools = set(terminal_tools)
+
+    def apply(self, ctx: Context) -> None:
+        ctx.on("agent/post-tool", self._post)
+
+    def _post(self, payload: dict, next_: Callable[[], Any]) -> dict:
+        result = payload["result"]
+        if result.get("status") == "ok" and result.get("name") in self.terminal_tools:
+            return {"continue": False, "answer": result.get("content", "")}
+        return next_()
+
+
 # ═══════════════ 日志消费者：Persistence / AgentTrace ═══════════════
 class PersistenceConsumer(Plugin):
-    """把 Session 日志喂给 `Persistence.PersistenceManager`（复用 save_messages 轻量接口）。
+    """把 Session 日志喂给 `Persistence.PersistenceManager`（复用 `save_session` 完整接口）。
 
-    沿用 legacy 的频率语义：只在模型可见内容变化的事件后落盘。
+    沿用 legacy 的频率语义：只在模型可见内容变化的事件后落盘；`summary` 与
+    `active_skills` 经 `ctx.get("compaction")` / `ctx.get("skills")` 现取，缺失则用空值。
     """
 
     inject = ("session",)
-    SAVE_ON = ("assistant/message", "tool/result", "context/compacted")
+    SAVE_ON = ("assistant/message", "tool/result", "tool/denied", "context/compacted")
 
     def __init__(self, manager: Persistence.PersistenceManager | None = None,
                  session_id: str | None = None) -> None:
         self.manager = manager or Persistence.PersistenceManager()
         self.session_id = session_id or self.manager.new_session_id()
         self.saves = 0
+        self._ctx: Context | None = None
         self._session: Session | None = None
+        self._last_input = ""
 
     def apply(self, ctx: Context) -> None:
+        self._ctx = ctx
         self._session = ctx.get("session")
         ctx.effect(self._session.subscribe(self._on_event))
 
     def _on_event(self, event: dict) -> None:
-        if event["type"] in self.SAVE_ON and self._session is not None:
-            self.manager.save_messages(self.session_id, self._session.derive_messages())
-            self.saves += 1
+        if event["type"] == "user/message":
+            self._last_input = event.get("content", "")
+            return
+        if event["type"] not in self.SAVE_ON or self._session is None:
+            return
+        compaction = self._ctx.get("compaction") if self._ctx else None
+        skills = self._ctx.get("skills") if self._ctx else None
+        trace = self._ctx.get("trace") if self._ctx else None
+        self.manager.save_session(
+            self.session_id,
+            self._session.derive_messages(),
+            compaction.summary if compaction is not None else "",
+            trace.tracer.to_dicts() if trace is not None else [],
+            skills.active_names() if skills is not None else [],
+            self._last_input,
+        )
+        self.saves += 1
 
 
 class TraceConsumer(Plugin):
@@ -235,6 +303,7 @@ class TraceConsumer(Plugin):
 
     def apply(self, ctx: Context) -> None:
         self._session: Session = ctx.get("session")
+        ctx.provide("trace", self)          # 供 PersistenceConsumer 落盘真实 span
         ctx.effect(self._session.subscribe(self._on_event))
 
     def _on_event(self, event: dict) -> None:
@@ -242,18 +311,17 @@ class TraceConsumer(Plugin):
         if kind == "turn/start":
             self.run = self.tracer.start_run(self.run_id, event.get("input", ""))
         elif kind == "assistant/message" and event.get("tool_calls"):
-            # 让 log_llm_call 可复用：喂一个只实现它读取的字段的 duck-typed response
-            calls = [SimpleNamespace(function=SimpleNamespace(
-                name=call.get("name", ""),
-                arguments=json.dumps(call.get("args") or {}, ensure_ascii=False),
-            )) for call in event["tool_calls"]]
-            response = SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(
-                    content=event.get("content", ""), tool_calls=calls))],
-                usage=None,
-            )
+            # 只传纯数据：不再伪造 provider 响应对象，追踪器也不认识任何 SDK 类型
             messages = self._session.derive_messages()[:-1]   # 去掉刚追加的这条回复
-            self._span(self.tracer.log_llm_call(messages, response, 0.0))
+            self._span(self.tracer.log_llm_call(
+                messages,
+                content=event.get("content", ""),
+                tool_calls=[
+                    {"name": call.get("name", ""),
+                     "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False)}
+                    for call in event["tool_calls"]
+                ],
+            ))
         elif kind == "tool/result":
             self._span(self.tracer.log_tool_call(
                 event.get("name", ""), event.get("args") or {},
@@ -363,8 +431,61 @@ class SkillRegistry(Plugin):
     def get_active_tools(self) -> list[dict]:
         return self.manager.get_active_tools()
 
+    def active_names(self) -> list[str]:
+        """已激活技能名（供持久化恢复/保存会话时记录）。"""
+        return sorted(self._active)
+
     def get_active_prompt(self) -> str:
         return self.manager.get_active_prompt()
+
+
+class SystemPromptPlugin(Plugin):
+    """system prompt 同步策略：技能装载后，其领域提示立刻进入模型可见历史。
+
+    legacy 每步重算 system prompt 并覆写 `messages[0]`；Session 是 append-only 日志，
+    这里改为「组合结果与日志里最后一条 `system/message` 不同时追加一条」。
+    技能的装载/卸载都走工具调用，故订阅 `tools/result` 就能在**同一轮内**、下次采样前刷新；
+    再订阅 `agent/pre-step` 覆盖每轮开始；`apply` 时的首次同步对应 legacy 的 `messages[0]`。
+    """
+
+    inject = ("session", "skills")
+
+    def __init__(self, base_prompt: str = "") -> None:
+        self.base_prompt = base_prompt
+
+    def apply(self, ctx: Context) -> None:
+        self._session: Session = ctx.get("session")
+        self._skills = ctx.get("skills")
+        self.sync()
+        ctx.on("tools/result", self._on_event)
+        ctx.on("agent/pre-step", self._pre)
+
+    def compose(self) -> str:
+        """base + 已激活技能的领域提示（与 legacy `build_system_prompt` 同形）。"""
+        parts = [self.base_prompt]
+        skill_prompt = self._skills.get_active_prompt()
+        if skill_prompt:
+            parts.append(f"\n\n--- 当前激活的技能 ---\n{skill_prompt}")
+        return "\n".join(parts)
+
+    def sync(self) -> None:
+        """组合结果变化时追加一条 system/message；未变化则不动。"""
+        prompt = self.compose()
+        if not prompt:
+            return
+        for event in reversed(self._session.events):
+            if event["type"] == "system/message":
+                if event["content"] == prompt:
+                    return
+                break
+        self._session.append("system/message", content=prompt)
+
+    def _on_event(self, payload: dict) -> None:
+        self.sync()
+
+    def _pre(self, payload: dict, next_: Callable[[], Any]) -> dict:
+        self.sync()
+        return next_()
 
 
 def _bind_legacy(fn: Callable[..., Any]) -> Callable[[dict], Any]:

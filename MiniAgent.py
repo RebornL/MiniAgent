@@ -1,23 +1,33 @@
 """
 一个最精简的 Agent 核心实现
 依赖: pip install openai
+
+入口已迁移到 miniharness：`build_harness` 装配「Session + 工具 + provider + 策略插件」，
+`chat_loop` 每轮只调 `loop.turn(user_input)`。策略（压缩/重试/超时/校验/终结/持久化/追踪）
+全部挂在事件 seam 上，循环零改动——见 `miniharness.py` 与 `miniharness_plugins.py`。
 """
-import concurrent.futures
 import json
-import os
-import time
-import uuid
 from pathlib import Path
+from typing import Callable
 
 from openai import OpenAI
 
-from AgentTrace import Span, AgentTracer
-from CallFunc import call_with_timeout
-from Compaction import ContextManager, to_dict
 from Persistence import PersistenceManager, Store
-from RetryFunc import with_retry
-from SkillManager import SkillManager, Skill
-from Structure import make_final_output_tool, sanitize_output, sanitize_string
+from SkillManager import Skill
+from Structure import sanitize_output, sanitize_string
+from miniharness import Context, LLM, Loop, Session, ToolRuntime
+from miniharness_deepseek import DeepSeekProvider
+from miniharness_plugins import (
+    CompactionPlugin,
+    FinalOutputPlugin,
+    PersistenceConsumer,
+    RetryPlugin,
+    SkillRegistry,
+    SystemPromptPlugin,
+    ToolTimeoutPlugin,
+    TraceConsumer,
+    ValidationPlugin,
+)
 
 
 def _load_config() -> dict:
@@ -32,11 +42,21 @@ def _load_config() -> dict:
         return json.load(f)
 
 
-_config = _load_config()
-client = OpenAI(
-    base_url=_config["base_url"],
-    api_key=_config["api_key"],
-)
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    """惰性构造 client：只有真正要调真实 LLM 时才读 config.json。
+
+    导入期不得触碰 config.json（它在 .gitignore 里，全新 clone 上不存在），
+    否则 `import MiniAgent` 会直接 FileNotFoundError。
+    """
+    global _client
+    if _client is None:
+        config = _load_config()
+        _client = OpenAI(base_url=config["base_url"], api_key=config["api_key"])
+    return _client
+
 
 # ─── 1. 定义工具 ─────────────────────────────────
 # 工具就是一个函数 + 一段描述（给 LLM 看的）
@@ -78,195 +98,64 @@ def write_file(path: str, content: str) -> str:
     except Exception as e:
         return f"写入文件失败: {e}"
 
-# ─── 2. 工具注册表（LLM 通过描述知道有什么工具可用）───
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "搜索互联网获取信息，输入中文关键词",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "搜索关键词"}
-                },
-                "required": ["query"],
-            },
+# ─── 2. 工具表（LLM 通过描述知道有什么工具可用）───
+# 工具名 → (描述, JSON Schema, 函数)：ToolRuntime 的定义与 Skill 的 tool 定义同源派生
+TOOLS: dict[str, tuple[str, dict, Callable[..., str]]] = {
+    "search_web": (
+        "搜索互联网获取信息，输入中文关键词",
+        {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "搜索关键词"}},
+            "required": ["query"],
         },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "calculate",
-            "description": "执行数学计算，输入数学表达式",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string", "description": "数学表达式，如 '3*15+2'"}
-                },
-                "required": ["expression"],
-            },
+        search_web,
+    ),
+    "calculate": (
+        "执行数学计算，输入数学表达式",
+        {
+            "type": "object",
+            "properties": {"expression": {"type": "string", "description": "数学表达式，如 '3*15+2'"}},
+            "required": ["expression"],
         },
-    },
-]
-
-# 工具名 → 实际函数的映射
-TOOL_MAP = {
-    "search_web": search_web,
-    "calculate": calculate,
+        calculate,
+    ),
+    "read_file": (
+        "读取文件内容",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "文件路径"}},
+            "required": ["path"],
+        },
+        read_file,
+    ),
+    "write_file": (
+        "写入文件内容",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "文件内容"},
+            },
+            "required": ["path", "content"],
+        },
+        write_file,
+    ),
 }
 
-# ─── 3. 核心循环（Agent 的"大脑"）─────────────────
-SYSTEM_PROMPT = """你是一个有用的助手。你可以使用工具来获取信息或执行计算。
-遇到不确定的事情时，请调用工具而不是猜测。"""
 
-def run_agent(user_input: str, max_steps: int = 5) -> str:
-    """
-    Agent 主循环：思考 → 行动 → 观察 → 再思考 → ... → 回答
-    """
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_input},
-    ]
-
-    for step in range(max_steps):
-        print(f"\n{'='*50}")
-        print(f"🔄 第 {step+1} 轮思考...")
-
-        # 调用 LLM，告诉它有哪些工具可用
-        response = client.chat.completions.create(
-            model="deepseek-v4-flash",
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",  # LLM 自己决定要不要调工具
-        )
-
-        msg = response.choices[0].message
-
-        # 情况 A：LLM 认为不需要调工具，直接输出最终答案
-        if not msg.tool_calls:
-            print(f"✅ Agent 给出最终回答")
-            return msg.content
-
-        # 情况 B：LLM 想调工具
-        # 先把 LLM 的回复（含 tool_call）加入对话历史
-        messages.append(msg)
-
-        for tool_call in msg.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-
-            print(f"🔧 调用工具: {name}({args})")
-
-            # 执行工具
-            func = TOOL_MAP[name]
-            result = func(**args)
-
-            print(f"📊 工具返回: {result}")
-
-            # 把工具执行结果加入对话历史
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": result,
-            })
-
-        # 循环回去，让 LLM 看到工具结果后继续思考
-
-    return "⚠️ 达到最大步数限制，Agent 未能在限定步数内完成任务"
+def _skill_tool(name: str) -> dict:
+    """Skill 的 tool 定义（OpenAI 形状），与 ToolRuntime 里的描述同源。"""
+    description, parameters, _ = TOOLS[name]
+    return {"type": "function",
+            "function": {"name": name, "description": description, "parameters": parameters}}
 
 
-def build_system_prompt(base_prompt: str, skills: SkillManager) -> str:
-    """组装 system prompt = base + 激活 skill 的领域知识"""
-    parts = [base_prompt]
-    skill_prompt = skills.get_active_prompt()
-    if skill_prompt:
-        parts.append(f"\n\n--- 当前激活的技能 ---\n{skill_prompt}")
-    return "\n".join(parts)
+def _skill_tool_map(*names: str) -> dict[str, Callable[..., str]]:
+    """技能的工具名 → 函数（legacy 工具是 `fn(**args)`）。"""
+    return {name: TOOLS[name][2] for name in names}
 
-# ═══════════════════════════════════════════════════════════════
-# 辅助：流式 LLM 调用
-# ═══════════════════════════════════════════════════════════════
-def stream_llm_call(
-    client: OpenAI,
-    model: str,
-    messages: list[dict],
-    tools: list[dict],
-) -> tuple[str | None, list[dict] | None]:
-    """流式调用 LLM，边收边打印，tool_call 实时展示"""
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-        stream=True,
-    )
-
-    content_chunks: list[str] = []
-    tool_call_chunks: dict[int, dict] = {}  # index → {id, name, arguments}
-    shown_tool_names: set[int] = set()       # 已打印过的 tool 名
-
-    print("🧠 ", end="", flush=True)
-
-    for chunk in response:
-        delta = chunk.choices[0].delta if chunk.choices else None
-        if delta is None:
-            continue
-
-        # ── 文本内容 ──
-        if delta.content:
-            print(delta.content, end="", flush=True)
-            content_chunks.append(delta.content)
-
-        # ── tool_calls：实时显示 ──
-        if delta.tool_calls:
-            for tc_delta in delta.tool_calls:
-                idx = tc_delta.index
-                if idx not in tool_call_chunks:
-                    tool_call_chunks[idx] = {
-                        "id": tc_delta.id or "",
-                        "name": "",
-                        "arguments": "",
-                    }
-                if tc_delta.id:
-                    tool_call_chunks[idx]["id"] = tc_delta.id
-                if tc_delta.function.name:
-                    tool_call_chunks[idx]["name"] = tc_delta.function.name
-                    # ✅ 新增：一旦拿到 name 就立刻打印
-                    if idx not in shown_tool_names:
-                        print(f"\n  🔧 调用 {tc_delta.function.name}", end="", flush=True)
-                        shown_tool_names.add(idx)
-                if tc_delta.function.arguments:
-                    tool_call_chunks[idx]["arguments"] += tc_delta.function.arguments
-
-    # 如果前面没打印过 content 且没 tool_call，补换行
-    if not content_chunks and not tool_call_chunks:
-        print()
-
-    # ── 组装结果 ──
-    if tool_call_chunks:
-        tc_list = []
-        for idx in sorted(tool_call_chunks.keys()):
-            tc = tool_call_chunks[idx]
-            tc_list.append({
-                "id": tc["id"],
-                "type": "function",
-                "function": {
-                    "name": tc["name"],
-                    "arguments": tc["arguments"],
-                },
-            })
-            # 打印参数（紧跟 name 后面）
-            args_preview = tc["arguments"][:60] + ("..." if len(tc["arguments"]) > 60 else "")
-            if args_preview:
-                print(f"({args_preview})")
-        return None, tc_list
-    else:
-        print()  # 纯文本结束换行
-        return "".join(content_chunks), None
-
-# 文件顶部，其他常量旁边
+# final_output：模型用来交付结构化最终答案的终结工具
 OUTPUT_TOOL_NAMES = {"final_output"}
 
 
@@ -302,363 +191,167 @@ def final_output_handler(result: dict, summary: str = "") -> str:
         sanitize_string(summary)  # 检测 summary
     return json.dumps({"result": result, "summary": summary}, ensure_ascii=False)
 
-def run_agent_with_trace(
-    user_input: str,
+
+def register_skills(skills: SkillRegistry) -> None:
+    """注册 4 个技能：装载即把技能工具挂进 ToolRuntime（可逆），卸载即撤销。"""
+    skills.register(Skill(
+        name="web-search",
+        description="互联网搜索能力",
+        tools=[_skill_tool("search_web")],
+        tool_map=_skill_tool_map("search_web"),
+        system_prompt="你拥有搜索能力。遇到不确定的事实性问题，请先搜索再回答，不要猜测。",
+    ))
+
+    skills.register(Skill(
+        name="calculator",
+        description="数学计算能力",
+        tools=[_skill_tool("calculate")],
+        tool_map=_skill_tool_map("calculate"),
+        system_prompt="你拥有计算能力。遇到数学计算请调用 calculate 工具，不要心算。",
+    ))
+
+    skills.register(Skill(
+        name="file-ops",
+        description="文件读写能力",
+        tools=[_skill_tool("read_file"), _skill_tool("write_file")],
+        tool_map=_skill_tool_map("read_file", "write_file"),
+        system_prompt="你拥有文件读写能力。操作文件前请确认路径正确。",
+    ))
+
+    skills.register(Skill(
+        name="structured-output",
+        description="结构化输出能力",
+        tools=[make_final_output_tool()],
+        tool_map={"final_output": final_output_handler},
+        system_prompt=(
+            "回答问题时，请调用 final_output 以结构化格式输出最终结果。"
+            "result 字段放 JSON 结构化数据，summary 字段放给用户看的自然语言总结。"
+            "调用 final_output 后不要再返回其他文本。"
+        ),
+    ))
+
+
+# ─── 3. 装配 miniharness ─────────────────────────
+def build_harness(
     *,
-    tracer: AgentTracer,
-    client: OpenAI,
-    ctx: ContextManager,
-    pm: PersistenceManager,
-    skills: SkillManager,
-    base_system_prompt: str,
-    session_id: str | None = None,
-    max_steps: int = 5,
     model: str = "deepseek-v4-flash",
-) -> str:
+    session_id: str | None = None,
+    store_dir: str = "./agent_sessions",
+    client: OpenAI | None = None,
+    llm: LLM | None = None,
+    base_system_prompt: str = "",
+) -> tuple[Context, Session, Loop]:
+    """装配 harness：Session + 工具 + LLM provider + 策略插件 + 日志消费者。
+
+    策略全挂在事件 seam 上（Loop 零改动）：压缩 → `agent/pre-step`，
+    重试/超时 → `tools/execute`，输出校验 → `tools/post-execute`，
+    终结工具 → `agent/post-tool`，持久化/追踪 → Session 日志订阅。
+    工具不预注册：只随技能装载经 `SkillRegistry` 可逆注册（`unload_skill` 即撤销），
+    与 legacy `get_active_tools()`（meta tools + 仅已激活技能的工具）一致。
+    不装 PermissionPlugin——legacy 没有审批，装了会改变行为。
     """
-    带 可观测 + 压缩 + 持久化 的 Agent 循环。
-    在原来 run_agent_with_trace 上直接加持久化能力。
-    """
+    ctx = Context()
+    session = Session()
+    ctx.provide("session", session)
 
-    # ── 创建或恢复会话 ─────────────────────────────
-    if session_id:
-        state = pm.load_session(session_id)
-        messages = state["messages"]
-        ctx.restore(state["summary"])
-        skills.reset()
-        for name in state.get("active_skills", []):
-            # 加载之前对话的skill
-            skills.load(name)
-        print(f"📂 恢复会话 {session_id}，已有 {len(messages)} 条消息")
-    else:
-        session_id = pm.new_session_id()
-        messages = []
+    loop = Loop()
+    ctx.load(loop)                    # 依赖未就绪 → 挂起，provider/工具齐后自动激活
+    ctx.load(ToolRuntime())
+    ctx.load(llm if llm is not None else _default_llm(client, model))
 
-    # 追加用户输入 + 确保 system prompt 在第一位
-    messages.append({"role": "user", "content": user_input})
-    if not messages or messages[0].get("role") != "system":
-        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+    ctx.load(CompactionPlugin())
+    ctx.load(RetryPlugin())
+    ctx.load(ToolTimeoutPlugin())
+    ctx.load(ValidationPlugin())
+    ctx.load(FinalOutputPlugin(OUTPUT_TOOL_NAMES))
+    ctx.load(PersistenceConsumer(PersistenceManager(Store(store_dir)), session_id))
+    ctx.load(TraceConsumer())
 
-    # ── Trace 开始 ─────────────────────────────────
-    run_id = f"run_{os.urandom(6).hex()}"
-    run = tracer.start_run(run_id, user_input)
+    skills = SkillRegistry()
+    register_skills(skills)
+    ctx.load(skills)
+    ctx.load(SystemPromptPlugin(base_system_prompt))
 
-    # ── 主循环 ─────────────────────────────────────
-    for step in range(max_steps):
-        # ← 新增：每次 LLM 调用前动态拼装 tools
-        active_tools = skills.get_active_tools()
-        active_tool_map = skills.get_active_tool_map()
+    return ctx, session, loop
 
-        # ← 新增：动态拼装 system prompt
-        system_prompt = build_system_prompt(base_system_prompt, skills)
-        if messages and messages[0].get("role") == "system":
-            messages[0]["content"] = system_prompt
-        else:
-            messages.insert(0, {"role": "system", "content": system_prompt})
 
-        print(ctx.stats(messages))
-        # 修改为流式输出
-        t0 = time.time()
+def _print_delta(text: str) -> None:
+    """默认流式回调：边收边打印（与 legacy 的流式输出一致）。"""
+    print(text, end="", flush=True)
+
+
+def _default_llm(api: OpenAI | None, model: str) -> DeepSeekProvider:
+    """默认 provider：用传入的 client，否则惰性构造（config.json 的凭据）。"""
+    return DeepSeekProvider(api or _get_client(), model, on_delta=_print_delta)
+
+
+def _open_harness(
+    pm: PersistenceManager,
+    session_id: str,
+    *,
+    model: str,
+    store_dir: str,
+    client: OpenAI | None,
+    base_system_prompt: str,
+    llm: LLM | None = None,
+) -> Loop:
+    """装配 harness 并接上持久化状态：messages / summary / active_skills 一并还原。"""
+    ctx, session, loop = build_harness(model=model, session_id=session_id,
+                                       store_dir=store_dir, client=client, llm=llm,
+                                       base_system_prompt=base_system_prompt)
+    state = pm.load_session(session_id)
+    if state["messages"]:
+        session.restore(state["messages"])
+    if state["summary"]:
+        ctx.get("compaction").context.restore(state["summary"])
+    skills = ctx.get("skills")
+    for name in state["active_skills"]:
         try:
-            # 补充重试机制
-            def _call():
-                return stream_llm_call(client, model, messages, active_tools)
-            content, tool_calls = with_retry(_call, label="LLM")
-        except Exception as e:
-            llm_err = Span(
-                span_id=f"llm_{os.urandom(4).hex()}",
-                type="llm_call", start_time=t0, end_time=time.time(), error=str(e),
-            )
-            run.children.append(llm_err)
-            raise
+            skills.load(name)
+        except KeyError:      # 技能已不存在（改名/删除）→ 跳过，不影响恢复
+            pass
+    return loop
 
-        # 记录 trace（用简化版，因为流式没有完整 response 对象）
-        # 手动构造 Span 时，把 tool_calls 拍平
-        flat_tool_calls = [
-            {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}
-            for tc in (tool_calls or [])
-        ]
-        input_tokens = ctx.count_tokens(messages)
-        output_text = content or ""
-        if tool_calls:
-            output_text += json.dumps(tool_calls, ensure_ascii=False)
-        output_tokens = len(ctx.encoder.encode(output_text))
-        estimated_tokens = input_tokens + output_tokens
-        llm_span = Span(
-            span_id=f"llm_{os.urandom(4).hex()}",
-            type="llm_call",
-            start_time=t0,
-            end_time=time.time(),
-            input={"message_count": len(messages)},
-            output={"content": content, "tool_calls": flat_tool_calls},  # ← 拍平后存
-            tokens_used=estimated_tokens,
-        )
-        run.children.append(llm_span)
-
-        # 结构化输出整理
-        if tool_calls is None:
-            # 保存每一轮问答的结论，避免重复回答
-            messages.append({"role": "assistant", "content": content})
-            run.end_time = time.time()
-            pm.save_session(
-                session_id, messages, ctx.summary,
-                tracer.to_dicts(), list(skills._active), user_input,
-            )
-            print(tracer.summary(run))
-            print(f"💾 会话已保存: {session_id}")
-            return content or ""
-
-        # 有 tool_calls → 和之前一样，但不再 append assistant 消息（stream 里没有标准 msg 对象）
-        # 手动构造 assistant 消息
-        assistant_msg = {
-            "role": "assistant",
-            "content": content,
-            "tool_calls": tool_calls,
-        }
-        messages.append(assistant_msg)
-
-        # 串行执行工具调用
-        # for tc in tool_calls:
-        #     name = tc["function"]["name"]
-        #     args = json.loads(tc["function"]["arguments"])
-        #
-        #     t0 = time.time()
-        #     # try:
-        #     #     result = active_tool_map[name](**args)  # ← 注意这里用 active_tool_map
-        #     # except Exception as e:
-        #     #     result = f"工具执行错误: {e}"
-        #     # 包一层超时
-        #     result = call_with_timeout(
-        #         active_tool_map[name],
-        #         kwargs=args,
-        #         timeout=30,  # 可配置
-        #     )
-        #
-        #     # ✅ 新增：final_output 是最终答案，直接返回（不再继续循环）
-        #     if name in OUTPUT_TOOL_NAMES:
-        #         messages.append({"role": "assistant", "content": result})
-        #         run.end_time = time.time()
-        #         pm.save_session(
-        #             session_id, messages, ctx.summary,
-        #             tracer.to_dicts(), list(skills._active), user_input,
-        #         )
-        #         print(tracer.summary(run))
-        #         print(f"💾 会话已保存: {session_id}")
-        #         return result
-        #
-        #     tool_span = tracer.log_tool_call(name, args, str(result), time.time() - t0)
-        #     run.children.append(tool_span)
-        #
-        #     print(f"  🔧 {name}({args}) → {str(result)[:80]}")
-        #
-        #     messages.append({
-        #         "role": "tool",
-        #         "tool_call_id": tc["id"],
-        #         "content": str(result),
-        #     })
-        # ── 改为并行执行 ──
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tool_calls)) as executor:
-
-            # 提交所有工具到线程池
-            future_map: dict[concurrent.futures.Future, dict] = {}
-            for tc in tool_calls:
-                name = tc["function"]["name"]
-                args = json.loads(tc["function"]["arguments"])
-
-                t0 = time.time()
-                future = executor.submit(
-                    call_with_timeout,
-                    active_tool_map[name],
-                    kwargs=args,
-                    timeout=30,
-                )
-                future_map[future] = {
-                    "name": name,
-                    "args": args,
-                    "start_time": t0,
-                    "tc": tc,
-                }
-
-            # 收集结果（按完成顺序或原始顺序）
-            tool_result_spans = []
-            final_output_found = None
-
-            for future in concurrent.futures.as_completed(future_map):
-                meta = future_map[future]
-                name = meta["name"]
-                args = meta["args"]
-                t0 = meta["start_time"]
-                tc = meta["tc"]
-
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = f"工具执行错误: {e}"
-
-                # 检查是否是 final_output（终止信号）
-                if name in OUTPUT_TOOL_NAMES:
-                    final_output_found = {
-                        "name": name,
-                        "args": args,
-                        "result": result,
-                        "tc": tc,
-                        "duration": time.time() - t0,
-                    }
-                    # 记录 span 但不返回，等其他工具结果也录完再统一返回
-                    span = tracer.log_tool_call(name, args, result, time.time() - t0)
-                    run.children.append(span)
-                    continue
-
-                # 普通工具：记录 span 和消息
-                span = tracer.log_tool_call(name, args, result, time.time() - t0)
-                run.children.append(span)
-                tool_result_spans.append((tc["id"], name, result))
-
-            # ── 处理 final_output ──
-            if final_output_found:
-                fo = final_output_found
-                messages.append({
-                    "role": "assistant",
-                    "content": fo["result"],
-                    "tool_calls": [{"id": fo["tc"]["id"], "type": "function", "function": fo["tc"]["function"]}],
-                })
-                run.end_time = time.time()
-                pm.save_session(
-                    session_id, messages, ctx.summary,
-                    tracer.to_dicts(), list(skills._active), user_input,
-                )
-                print(tracer.summary(run))
-                print(f"💾 会话已保存: {session_id}")
-                return fo["result"]
-
-            # ── 所有工具结果追加到 messages ──
-            for tc_id, name, result in tool_result_spans:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": result,
-                })
-                print(f"  🔧 {name} → {str(result)[:80]}")
-
-        # t0 = time.time()
-        # try:
-        #     response = client.chat.completions.create(
-        #         model=model,
-        #         messages=messages,
-        #         tools=active_tools,
-        #         tool_choice="auto",
-        #     )
-        # except Exception as e:
-        #     llm_err = Span(
-        #         span_id=f"llm_{os.urandom(4).hex()}",
-        #         type="llm_call",
-        #         start_time=t0,
-        #         end_time=time.time(),
-        #         error=str(e),
-        #     )
-        #     run.children.append(llm_err)
-        #     raise
-        #
-        # llm_span = tracer.log_llm_call(messages, response, time.time() - t0)
-        # run.children.append(llm_span)
-        #
-        # msg = response.choices[0].message
-        #
-        # # ✅ 新增：统一转 dict 再 append
-        # messages.append(to_dict(msg))
-        #
-        # # 无需工具 → 输出答案
-        # if not msg.tool_calls:
-        #     run.end_time = time.time()
-        #     # ✅ 新增：最终保存
-        #     pm.save_session(
-        #         session_id, messages, ctx.summary,
-        #         tracer.to_dicts(), list(skills._active), user_input,
-        #     )
-        #     print(tracer.summary(run))
-        #     print(f"💾 会话已保存: {session_id}")
-        #     return msg.content or ""
-        #
-        # # 执行工具
-        # for tool_call in msg.tool_calls:
-        #     name = tool_call.function.name
-        #     args = json.loads(tool_call.function.arguments)
-        #
-        #     t0 = time.time()
-        #     try:
-        #         result = active_tool_map[name](**args)
-        #     except Exception as e:
-        #         result = f"工具执行错误: {e}"
-        #
-        #     tool_span = tracer.log_tool_call(name, args, result, time.time() - t0)
-        #     run.children.append(tool_span)
-        #
-        #     messages.append({
-        #         "role": "tool",
-        #         "tool_call_id": tool_call.id,
-        #         "content": result,
-        #     })
-
-        # ✅ 新增：压缩检查
-        messages = ctx.maybe_compact(messages, client)
-
-        # ✅ 新增：每轮自动保存（防崩溃）
-        pm.save_messages(session_id, messages)
-
-    # 达到最大步数
-    run.end_time = time.time()
-    pm.save_session(session_id, messages, ctx.summary, tracer.to_dicts(), list(skills._active), user_input)
-    print(tracer.summary(run))
-    print(f"💾 会话已保存: {session_id}")
-    return "⚠️ 达到最大步数限制"
 
 def resume_session(
     session_id: str,
     new_input: str,
     *,
-    client: OpenAI,
-    tools: list[dict],
-    tool_map: dict[str, callable],
-    system_prompt: str,
+    model: str = "deepseek-v4-flash",
+    base_system_prompt: str = "",
     store_dir: str = "./agent_sessions",
-    max_steps: int = 5,
+    client: OpenAI | None = None,
+    llm: LLM | None = None,
 ) -> str:
-    """恢复历史会话并继续对话"""
-    return run_agent(
-        new_input,
-        client=client,
-        tools=tools,
-        tool_map=tool_map,
-        system_prompt=system_prompt,
-        session_id=session_id,
-        max_steps=max_steps,
-        persistence=PersistenceManager(Store(store_dir)),
-    )
+    """恢复历史会话并继续对话：装配 harness + 还原 messages/summary/active_skills 后跑一轮。"""
+    pm = PersistenceManager(Store(store_dir))
+    if not pm.load_messages(session_id):
+        return f"❌ 会话 {session_id} 不存在或为空"
+    loop = _open_harness(pm, session_id, model=model, store_dir=store_dir,
+                         client=client, llm=llm,
+                         base_system_prompt=base_system_prompt)
+    return loop.turn(new_input)
+
 
 def chat_loop(
-    client: OpenAI,
-    skills: SkillManager,
-    base_system_prompt: str,
+    client: OpenAI | None = None,
+    base_system_prompt: str = "",
     model: str = "deepseek-v4-flash",
     session_id: str | None = None,
     store_dir: str = "./agent_sessions",
 ):
     """
-    交互式多轮对话。
+    交互式多轮对话：每轮走 harness 的 `loop.turn`。
 
     用法:
-      >>> chat_loop(client, skills, "你是助手...")
+      >>> chat_loop(client, "你是助手...")
       You: 北京天气怎么样？
       Agent: 北京今天晴，25°C
-      You: 那上海呢？
-      Agent: 上海今天小雨，22°C
       You: /exit
     """
-    tracer = AgentTracer()
-    ctx = ContextManager()
     pm = PersistenceManager(Store(store_dir))
 
-    # 如果没有传入 session_id，新建一个
+    # 如果没有传入 session_id，新建一个；传了则恢复该会话的历史
     if session_id is None:
         session_id = pm.new_session_id()
         print(f"🆕 新会话: {session_id}")
@@ -666,6 +359,9 @@ def chat_loop(
         print(f"📂 恢复会话: {session_id}")
 
     print("输入 /exit 退出，/history 查看历史会话，/switch <id> 切换会话\n")
+
+    loop = _open_harness(pm, session_id, model=model, store_dir=store_dir,
+                         client=client, base_system_prompt=base_system_prompt)
 
     while True:
         try:
@@ -698,9 +394,9 @@ def chat_loop(
         # ── /new ──
         elif user_input == "/new":
             session_id = pm.new_session_id()
-            tracer = AgentTracer()
-            ctx = ContextManager()
-            skills.reset()
+            loop = _open_harness(
+                pm, session_id, model=model, store_dir=store_dir,
+                client=client, base_system_prompt=base_system_prompt)
             print(f"🆕 新会话: {session_id}")
             continue
 
@@ -735,189 +431,23 @@ def chat_loop(
                 continue
 
             session_id = new_id
-            tracer = AgentTracer()
-            ctx = ContextManager()
-            ctx.restore(state["summary"])
-            skills.reset()
+            loop = _open_harness(
+                pm, session_id, model=model, store_dir=store_dir,
+                client=client, base_system_prompt=base_system_prompt)
             print(f"✅ 已切换到 {session_id}（{len(state['messages'])} 条消息）")
 
         # ── 正常对话 ──
         else:
-            answer = run_agent_with_trace(
-                user_input,
-                tracer=tracer,
-                client=client,
-                ctx=ctx,
-                pm=pm,
-                skills=skills,
-                base_system_prompt=base_system_prompt,
-                session_id=session_id,
-                model=model,
-            )
+            answer = loop.turn(user_input)
             print(f"Agent: {answer}\n")
+
 
 # ─── 4. 跑起来 ────────────────────────────────────
 if __name__ == "__main__":
-    skills = SkillManager()
-
-    skills.register(Skill(
-        name="web-search",
-        description="互联网搜索能力",
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "search_web",
-                "description": "搜索互联网获取信息，输入中文关键词",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string", "description": "搜索关键词"}},
-                    "required": ["query"],
-                },
-            },
-        }],
-        tool_map={"search_web": search_web},
-        system_prompt="你拥有搜索能力。遇到不确定的事实性问题，请先搜索再回答，不要猜测。",
-    ))
-
-    skills.register(Skill(
-        name="calculator",
-        description="数学计算能力",
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "calculate",
-                "description": "执行数学计算，输入数学表达式",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"expression": {"type": "string", "description": "数学表达式"}},
-                    "required": ["expression"],
-                },
-            },
-        }],
-        tool_map={"calculate": calculate},
-        system_prompt="你拥有计算能力。遇到数学计算请调用 calculate 工具，不要心算。",
-    ))
-
-    # Skill 3: 文件操作
-    skills.register(Skill(
-        name="file-ops",
-        description="文件读写能力",
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_file",
-                    "description": "读取文件内容",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"path": {"type": "string", "description": "文件路径"}},
-                        "required": ["path"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_file",
-                    "description": "写入文件内容",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string", "description": "文件路径"},
-                            "content": {"type": "string", "description": "文件内容"},
-                        },
-                        "required": ["path", "content"],
-                    },
-                },
-            },
-        ],
-        tool_map={"read_file": read_file, "write_file": write_file},
-        system_prompt="你拥有文件读写能力。操作文件前请确认路径正确。",
-    ))
-
-    # 原来注册 skill 是手写 tool 定义
-    # 现在用工厂函数
-    # weather_schema = {
-    #     "type": "object",
-    #     "properties": {
-    #         "city": {"type": "string", "description": "城市名"},
-    #         "condition": {"type": "string", "description": "天气状况"},
-    #         "temperature": {"type": "number", "description": "温度（℃）"},
-    #     },
-    #     "required": ["city", "condition", "temperature"],
-    # }
-    #
-    # weather_tool, weather_handler = make_final_output_tool(
-    #     name="output_weather",
-    #     description="输出天气查询的最终结果。调用此工具表示回答完成。",
-    #     output_schema=weather_schema,
-    # )
-    #
-    # skills.register(Skill(
-    #     name="weather-output",
-    #     description="天气结果结构化输出",
-    #     tools=[weather_tool],
-    #     tool_map={"output_weather": weather_handler},
-    #     system_prompt="查询天气后，必须调用 output_weather 输出结构化结果，不要直接返回文本。",
-    # ))
-
-    skills.register(Skill(
-        name="structured-output",
-        description="结构化输出能力",
-        tools=[make_final_output_tool()],
-        tool_map={"final_output": final_output_handler},
-        system_prompt=(
-            "回答问题时，请调用 final_output 以结构化格式输出最终结果。"
-            "result 字段放 JSON 结构化数据，summary 字段放给用户看的自然语言总结。"
-            "调用 final_output 后不要再返回其他文本。"
-        ),
-    ))
-
     base_prompt = (
         "你是一个有用的助手。"
         "你可以使用 load_skill 加载需要的技能模块，用 unload_skill 释放不再需要的模块。每次回答前先加载 structured-output"
         "遇到不确定的事实时，请先加载对应技能再操作，不要猜测。"
     )
 
-    chat_loop(client, skills, base_prompt, "deepseek-v4-flash")
-    # tracer = AgentTracer()
-    # ctx = ContextManager()
-    # pm = PersistenceManager()
-    # answer = run_agent_with_trace(
-    #     "北京天气怎么样？顺便帮我算 156*23",
-    #     tracer=tracer,
-    #     client=client,
-    #     ctx=ctx,
-    #     pm=pm,
-    #     skills=skills,
-    #     base_system_prompt=base_prompt,
-    # )
-    # print(f"\n🎯 最终答案: {answer}")
-
-    # 新建会话
-    # answer = run_agent_with_trace(
-    #     "北京天气怎么样？",
-    #     tracer=tracer,
-    #     client=client,
-    #     ctx=ctx,
-    #     pm=pm,
-    # )
-    # print(f"\n{'=' * 50}")
-    # print(f"🎯 最终结果: {answer}")
-
-    # 恢复继续
-    # answer = run_agent_with_trace(
-    #     "那上海呢？",
-    #     tracer=tracer,
-    #     client=client,
-    #     ctx=ctx,
-    #     pm=pm,
-    #     session_id="20260701_143022_a1b2c3d4",
-    # )
-    # print(f"\n{'=' * 50}")
-    # print(f"🎯 最终结果: {answer}")
-
-    # agent_tracer = AgentTracer()
-    # result = run_agent_with_trace("1、北京天气怎么样？顺便帮我算一下 156 * 23; 2、上海天气怎么样？顺便帮我算一下 1126 * 523", agent_tracer)
-    # print(f"\n{'='*50}")
-    # print(f"🎯 最终结果: {result}")
+    chat_loop(_get_client(), base_prompt, "deepseek-v4-flash")

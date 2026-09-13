@@ -281,7 +281,17 @@ class Session:
             if seqs:
                 anchors.setdefault(min(seqs), []).append(event["summary"])
 
+        # system prompt 是「状态」而非「历史」：多条 system/message 只投影最后一条，且恒置最前。
+        # legacy 每步覆写 messages[0]；把 system 留在原位置会产生中位 system 消息，
+        # 部分 OpenAI 兼容接口会拒绝这种排列。
+        latest_system: tuple[dict, dict] | None = None
+        for event in self.events:
+            if event["type"] == "system/message" and event["seq"] not in masked:
+                latest_system = (event, {"role": "system", "content": event["content"]})
+
         entries: list[tuple[dict, dict]] = []
+        if latest_system is not None:
+            entries.append(latest_system)
         for event in self.events:
             for summary in anchors.get(event["seq"], ()):
                 # 摘要落在被替换区间的起始位置（日志尾部 append，投影时归位）
@@ -290,8 +300,8 @@ class Session:
                 continue
             kind = event["type"]
             if kind == "system/message":
-                entries.append((event, {"role": "system", "content": event["content"]}))
-            elif kind == "user/message":
+                continue
+            if kind == "user/message":
                 entries.append((event, {"role": "user", "content": event["content"]}))
             elif kind == "assistant/message":
                 message = {"role": "assistant", "content": event.get("content", "")}
@@ -306,6 +316,38 @@ class Session:
                 entries.append((event, {"role": "tool", "content": event["reason"],
                                         "tool_call_id": event.get("call_id", "")}))
         return entries
+
+    def restore(self, messages: list[dict]) -> None:
+        """把持久化的 messages 还原进日志（`session_from_messages` 的逆投影）。
+
+        恢复的是「这些历史已经发生过」的那段日志：直接赋值（而非 append），
+        以免把重放当成新事件通知日志消费者。
+        """
+        restored = self.session_from_messages(messages)
+        self.events = restored.events
+        self.seq = restored.seq
+
+    @classmethod
+    def session_from_messages(cls, messages: list[dict]) -> "Session":
+        """`derive_messages` 的逆：把模型可见的 messages 还原成事件日志。
+
+        用于恢复持久化的会话（`Persistence.load_session` 只存 messages）：
+        `session_from_messages(msgs).derive_messages() == msgs`。
+        """
+        session = cls()
+        for message in messages:
+            role = message.get("role")
+            if role == "system":
+                session.append("system/message", content=message.get("content", ""))
+            elif role == "user":
+                session.append("user/message", content=message.get("content", ""))
+            elif role == "assistant":
+                session.append("assistant/message", content=message.get("content", ""),
+                               tool_calls=list(message.get("tool_calls") or []))
+            elif role == "tool":
+                session.append("tool/result", content=message.get("content", ""),
+                               call_id=message.get("tool_call_id", ""))
+        return session
 
 
 # ═══════════════ 原语 3：ToolRuntime（工具定义 + 固定流水线） ═══════════════
@@ -456,6 +498,9 @@ def _to_content(value: Any) -> str:
 class Loop(Plugin):
     """只做「驱动 + 派发事件」：取输入 → `agent/pre-step` → llm seam → tools 管线 → 落日志。
 
+    每个工具结果入日志后派发 `agent/post-tool`（waterfall，默认 `{"continue": True}`）；
+    监听者返回 `{"continue": False, "answer": ...}` 即以该 answer 收尾本轮。
+
     循环体内没有任何权限、超时、重试、压缩判断——它们都是 `ctx.on(...)` 订阅者。
     """
 
@@ -492,17 +537,37 @@ class Loop(Plugin):
                 session.append("turn/end", status="done")
                 return text
 
+            # 先跑完整批（每个 tool_call 都必须落一条配对事件），再决定收尾。
+            # 中途 return 会让后续调用永不落日志 → 下轮上行 tool_calls 配对不完整（400）。
+            answer: str | None = None
+            denial: str | None = None
             for call in calls:
                 result = tools.run(call)                      # 只依赖 tools seam
                 if result["status"] == "denied":
-                    # 没有权威结果 → 不写 tool/result，直接以拒绝作为本轮答复
+                    # 没有权威结果 → 不写 tool/result，但仍需落配对事件并继续本批
                     session.append("tool/denied", name=result["name"],
                                    call_id=call.get("id", ""), reason=result["reason"])
-                    session.append("turn/end", status="denied")
-                    return result["reason"]
+                    if denial is None:
+                        denial = result["reason"]
+                    continue
                 session.append("tool/result", name=result["name"], call_id=call.get("id", ""),
                                args=call.get("args") or {},
                                content=result["content"], status=result["status"])
+                # 通用收尾 seam：终结策略在此短路本轮（Loop 不认识任何具体工具名）
+                stop = ctx.waterfall(
+                    "agent/post-tool",
+                    {"session": session, "call": call, "result": result},
+                    lambda p: {"continue": True},
+                )
+                if not stop.get("continue", True) and answer is None:
+                    answer = stop.get("answer", "")
+
+            if answer is not None:
+                session.append("turn/end", status="done")
+                return answer
+            if denial is not None:
+                session.append("turn/end", status="denied")
+                return denial
 
         session.append("turn/end", status="max-steps")
         return "⚠️ 达到最大步数限制"
