@@ -1,7 +1,7 @@
 """tools.runtime —— 工具运行时（Provider）：注册表 + 固定顺序的执行流水线。
 
 `tools/pre-execute (allow|deny|ask)` → 单调 guard → `tools/execute`(around)
-→ `tools/post-execute` → `finalizeContent` → `tools/result`（不可变权威结果）。
+→ `tools/post-execute` → `finalize_content` → `tools/result`（不可变权威结果）。
 
 权限 / 超时 / 重试 / 校验策略都不写在这里，而是订阅上述事件的插件（见 `capabilities/`）；
 本包只保证流水线顺序与「批内每个调用都有配对结果」。
@@ -25,7 +25,7 @@ class ToolRuntime(Plugin):
     """工具 seam 的 Provider：注册表 + 固定顺序的执行流水线。
 
     `tools/pre-execute (allow|deny|ask)` → 单调 guard → `tools/execute`(around)
-    → `tools/post-execute` → `finalizeContent` → `tools/result`。
+    → `tools/post-execute` → `finalize_content` → `tools/result`。
 
     返回值：`{"status": "ok"|"error"|"denied", "name", "content", ...}`；
     只有 `ok`/`error` 是**权威结果**（会派发 `tools/result`），`denied` 表示工具体未执行。
@@ -80,7 +80,7 @@ class ToolRuntime(Plugin):
         # 4) post-execute：观察或改写结果（错误结果同样可见）
         result = self._ctx.waterfall("tools/post-execute", {**payload, "result": result},
                                      lambda p: p["result"])
-        # 5) finalizeContent：最后的 content 不变量
+        # 5) finalize_content：最后的 content 不变量
         result = self._finalize(tool, result)
         # 6) tools/result：不可变权威结果（仅 ok/error 会走到这里）
         self._ctx.emit("tools/result", {**payload, "result": result})
@@ -104,7 +104,7 @@ class ToolRuntime(Plugin):
         try:
             value = self._ctx.waterfall(
                 "tools/execute",
-                {**payload, "timeoutMs": tool.timeoutMs},
+                {**payload, "timeout_ms": tool.timeout_ms},
                 lambda p: tool.execute(p["args"]),
             )
         except Exception as exc:  # 工具异常 → 结构化失败结果，不崩整轮
@@ -135,7 +135,7 @@ class ToolRuntime(Plugin):
         """收敛出模型可见的 `content`（恒为字符串）。"""
         if result["status"] == "ok":
             value = result.get("value")
-            result["content"] = (tool.finalizeContent(value) if tool.finalizeContent
+            result["content"] = (tool.finalize_content(value) if tool.finalize_content
                                  else _to_content(value))
         else:
             result["content"] = result.get("error", "")

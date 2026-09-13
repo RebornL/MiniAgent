@@ -11,11 +11,17 @@ import time
 
 from capabilities.final_output.provider import FinalOutputPlugin
 from capabilities.permission.provider import PermissionPlugin
-from capabilities.persistence.definition import PersistenceManager, Store
+from capabilities.persistence.definition import (
+    LOG_FORMAT,
+    LOG_VERSION,
+    PersistenceManager,
+    Store,
+)
 from capabilities.persistence.provider import PersistenceConsumer
 from capabilities.timeout.provider import ToolTimeoutPlugin
 from capabilities.tracing.provider import TraceConsumer
 from miniharness.loop import Loop
+from miniharness.session import Session
 from miniharness.session.test_projection import _event_types
 from miniharness.tools.contract import ToolDefinition
 from providers.mock import MockLLM
@@ -38,10 +44,11 @@ def test_turn_feeds_persistence_and_trace_consumers(tmp_path):
     answer = loop.turn("把 21 翻倍")
 
     assert answer == "42"
-    # 持久化：落盘内容 == 日志投影（同一个真相源）
+    # 持久化：磁盘上就是日志本身（同一个真相源），模型可见内容由它重放重建
     assert persistence.saves > 0
-    stored = PersistenceManager(Store(str(tmp_path))).load_messages("s1")
-    assert stored == session.derive_messages()
+    stored = PersistenceManager(Store(str(tmp_path))).load_events("s1")
+    assert stored == session.events
+    assert Session(events=stored).derive_messages() == session.derive_messages()
     # 追踪：run → llm_call(工具调用) + tool_call 两个 span，内容取自日志
     assert tracer.run is not None and tracer.run.input == "把 21 翻倍"
     (llm_span, tool_span) = tracer.run.children
@@ -49,6 +56,27 @@ def test_turn_feeds_persistence_and_trace_consumers(tmp_path):
     assert llm_span.output["tool_calls"] == [{"name": "double", "arguments": '{"n": 21}'}]
     assert tool_span.type == "tool_call"
     assert tool_span.input == {"tool": "double", "args": {"n": 21}} and tool_span.output == "42"
+
+
+def test_turn_leaves_a_readable_event_log_with_monotonic_seq(tmp_path):
+    """AC1：一次回合结束后，磁盘上是逐行可读的事件日志（带类型与单调序号），不是消息数组。"""
+    persistence = PersistenceConsumer(
+        PersistenceManager(Store(str(tmp_path))), session_id="s1")
+    _, session, loop, _ = _assemble(MockLLM().then_text("在的"), plugins=[persistence])
+
+    assert loop.turn("在吗") == "在的"
+
+    header, *lines = Store(str(tmp_path)).log_path("s1") \
+        .read_text(encoding="utf-8").splitlines()
+    header = json.loads(header)
+    assert header["format"] == LOG_FORMAT and header["version"] == LOG_VERSION
+    assert header["session_id"] == "s1" and header["created"]
+    records = [json.loads(line) for line in lines]
+    assert records == session.events
+    assert [r["seq"] for r in records] == sorted(r["seq"] for r in records)
+    assert [r["type"] for r in records] == [
+        "turn/start", "user/message", "assistant/message", "turn/end"]
+    assert all("role" not in record for record in records)   # 没有并行的消息数组
 
 
 # ═══════════════ S2 主 seam（集成）：turn 边界 ═══════════════

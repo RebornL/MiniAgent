@@ -23,7 +23,7 @@
 | 能力 | Definition（契约包） | Provider（实现包） | Consumer（消费方包） |
 | --- | --- | --- | --- |
 | `compaction` 压缩 | `capabilities.compaction.definition`（`CompactionConfig` / `ContextManager` / `to_text`） | `capabilities.compaction.provider`（`CompactionPlugin`、`stub_summarizer`） | `capabilities.persistence.provider`（落盘时读当前摘要）、`app.assembly`（恢复摘要） |
-| `persistence` 持久化 | `capabilities.persistence.definition`（`Store` / `PersistenceManager`） | `capabilities.persistence.provider`（`PersistenceConsumer`） | `app.assembly`、`app.cli`（恢复会话、列出历史） |
+| `persistence` 持久化 | `capabilities.persistence.definition`（`Store` / `PersistenceManager` / 事件日志的格式版本与迁移链） | `capabilities.persistence.provider`（`PersistenceConsumer`，订阅 Session 日志落盘，`flush()` 是崩溃承诺的屏障） | `app.assembly`、`app.cli`（重放日志恢复会话、列出历史） |
 | `retry` 重试 | `capabilities.retry.definition`（`is_retryable` / `with_retry`） | `capabilities.retry.provider`（`RetryPlugin`） | `miniharness.tools.runtime`（消费被包装后的调用结果） |
 | `timeout` 超时 | `capabilities.timeout.definition`（`DEFAULT_TOOL_TIMEOUT` 与超时调用语义） | `capabilities.timeout.provider`（`ToolTimeout` / `ToolTimeoutPlugin`） | `miniharness.tools.runtime`（把超时收敛为结构化 error） |
 | `validation` 输出校验 | `capabilities.validation.definition`（`sanitize_output` / `validate_output` 的注入检测与 schema 校验） | `capabilities.validation.provider`（`ValidationPlugin`） | `miniharness.tools.runtime`（消费被改写后的权威结果） |
@@ -36,7 +36,9 @@
 
 ## 本族的测试
 
-包内测试与实现同层、独立文件：`capabilities/<能力>/provider/test_*.py`。
-它们只装「实现 + 一个工具流水线」，并逐字对照契约包的语义（例如
-`capabilities/retry/provider/test_retry.py` 同时跑 `with_retry` 与 `RetryPlugin`）。
+包内测试与实现同层、独立文件：`capabilities/<能力>/definition/test_*.py` 与
+`capabilities/<能力>/provider/test_*.py`。它们只装「实现 + 一个工具流水线」，
+并逐字对照契约包的语义（例如
+`capabilities/retry/provider/test_retry.py` 同时跑 `with_retry` 与 `RetryPlugin`；
+`capabilities/persistence/definition/test_log_format.py` 逐字读回日志文件与迁移链）。
 跨包集成（装配整个 Loop）集中在 [`tests/`](../tests/README.md)。

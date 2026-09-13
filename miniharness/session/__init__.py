@@ -1,7 +1,8 @@
 """session —— 会话事件日志与投影（原语 2）。
 
 `Session` 是 append-only 的 typed 事件日志：`append()` 只增不改，`derive_messages()` 是
-「模型可见历史」的投影，`session_from_messages()` 是其逆投影，`compact()` 做 surface 替换。
+「模型可见历史」的投影，`replay()` 用已落盘的日志重放恢复，`session_from_messages()` 把
+v0 的消息数组翻译成事件，`compact()` 做 surface 替换。
 
 本包不含任何执行逻辑，是能力契约里最稳定的一层。
 """
@@ -109,21 +110,21 @@ class Session:
                                         "tool_call_id": event.get("call_id", "")}))
         return entries
 
-    def restore(self, messages: list[dict]) -> None:
-        """把持久化的 messages 还原进日志（`session_from_messages` 的逆投影）。
+    def replay(self, events: Iterable[dict]) -> None:
+        """用已落盘的事件日志重放恢复会话。
 
-        恢复的是「这些历史已经发生过」的那段日志：直接赋值（而非 append），
-        以免把重放当成新事件通知日志消费者。
+        重放不是新事件：直接赋值（而非 append），因此不通知日志消费者。
+        日志是权威源，恢复不做任何「逆投影」——逐字读回，逐字重现。
         """
-        restored = self.session_from_messages(messages)
-        self.events = restored.events
-        self.seq = restored.seq
+        self.events = list(events)
+        self.seq = self.events[-1]["seq"] if self.events else 0
 
     @classmethod
     def session_from_messages(cls, messages: list[dict]) -> "Session":
         """`derive_messages` 的逆：把模型可见的 messages 还原成事件日志。
 
-        用于恢复持久化的会话（`Persistence.load_session` 只存 messages）：
+        只用于把 v0 的历史格式（`messages.json` 的消息数组）翻译成事件日志，
+        见 `capabilities.persistence.definition.translate`：
         `session_from_messages(msgs).derive_messages() == msgs`。
         """
         session = cls()

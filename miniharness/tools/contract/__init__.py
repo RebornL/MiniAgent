@@ -19,5 +19,5 @@ class ToolDefinition:
     description: str
     parameters: dict
     execute: Callable[[dict], Any]
-    timeoutMs: int = 0
-    finalizeContent: Callable[[Any], str] | None = None
+    timeout_ms: int = 0
+    finalize_content: Callable[[Any], str] | None = None

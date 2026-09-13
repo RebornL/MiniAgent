@@ -29,7 +29,7 @@ flowchart TB
     E --> C
     C -->|"deny"| F["tool/denied<br/>工具体不执行，无权威结果"]
     D --> G["tools/post-execute<br/>接受 / 改写：输出校验 / 提醒注入"]
-    G --> H["finalizeContent<br/>收敛出恒为 str 的 content"]
+    G --> H["finalize_content<br/>收敛出恒为 str 的 content"]
     H --> I["tools/result<br/>不可变权威结果（仅 ok / error）"]
 ```
 
@@ -41,9 +41,9 @@ flowchart TB
 
 | 族 | 内容 | 包地图 |
 | --- | --- | --- |
-| `miniharness/` | 骨架：`core`（Context/Plugin）、`session`（事件日志 + 投影）、`tools/{contract,runtime}`、`llm/contract`、`loop`（零策略） | [`miniharness/README.md`](../miniharness/README.md) |
+| `miniharness/` | 骨架：`core`（Context/Plugin）、`session`（事件日志 + 投影）、`tools/{contract,runtime}`、`llm/contract`、`process/contract`、`loop`（零策略） | [`miniharness/README.md`](../miniharness/README.md) |
 | `capabilities/` | 能力族：每个能力按 `definition`（契约）/ `provider`（实现）/ `consumer`（消费方）拆包——压缩 / 持久化 / 重试 / 超时 / 校验 / 追踪 / 技能 / 审批 / 终结 | [`capabilities/README.md`](../capabilities/README.md) |
-| `providers/` | 后端族：`deepseek`（真实）、`mock`（离线） | [`providers/README.md`](../providers/README.md) |
+| `providers/` | 后端族：`deepseek`（真实）、`mock`（离线）、`process`（受管范围的平台后端） | [`providers/README.md`](../providers/README.md) |
 | `app/` | 装配族：`config` / `tools` / `assembly`（`build_harness`）/ `cli`（`chat_loop`）/ `__main__` | [`app/README.md`](../app/README.md) |
 | `tests/` | 测试族：跨包集成集中一处；包内测试与实现同层 | [`tests/README.md`](../tests/README.md) |
 

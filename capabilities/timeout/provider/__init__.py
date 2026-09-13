@@ -28,7 +28,7 @@ class ToolTimeoutPlugin(Plugin):
 
     与 legacy `CallFunc.call_with_timeout` 的**有意差别**（用户裁定）：超时不再伪装成
     一个 `ok` 的字符串结果，而是抛出异常，让权威结果明确是 `error`，下游可按 status 区分
-    「超时」与「成功」。默认超时沿用 `DEFAULT_TOOL_TIMEOUT`；工具可用 `timeoutMs` 覆盖。
+    「超时」与「成功」。默认超时沿用 `DEFAULT_TOOL_TIMEOUT`；工具可用 `timeout_ms` 覆盖。
 
     **超时只能「停止等待」，不能「取消执行」**：Python 杀不掉线程，被放弃的工具体仍会跑到底
     （结果丢弃、无副作用回滚）。因此工具体一律跑在 **daemon** 线程里——legacy 用的
@@ -44,7 +44,7 @@ class ToolTimeoutPlugin(Plugin):
         ctx.on("tools/execute", self._wrap)
 
     def _wrap(self, payload: dict, next_: Callable[[], Any]) -> Any:
-        timeout_ms = payload.get("timeoutMs") or self.default_ms
+        timeout_ms = payload.get("timeout_ms") or self.default_ms
         outcome: list[Any] = []
         failure: list[BaseException] = []
         finished = threading.Event()

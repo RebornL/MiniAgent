@@ -1,28 +1,135 @@
+"""persistence.definition —— 会话持久化的契约与落盘实现。
+
+会话历史以**事件日志**落盘，而不是模型可见历史的数组副本：
+
+- `events.v<N>.jsonl`：权威事件日志。首行是 header（`format` / `version` / `created`），
+  其后逐行一条事件（`seq` 单调递增 + `type`）；写入只发布**当代版本**；
+- `meta.json` / `traces.json`：旁挂的元数据与派生追踪，不是权威源；
+- `messages.json`：v0 的历史格式（消息数组），只在没有当代日志时作迁移源，只读。
+
+模型可见内容由日志重放重建（`Session.replay`），因此磁盘上不存在并行的 messages 数组。
+格式演进走**相邻版本迁移链**（`translate`）：旧代际记录逐级翻译成当代事件日志。
+
+（本包同时含契约与落盘实现，与 `docs/packaging.md` §9「已知偏差」一致。）
+"""
+from __future__ import annotations
+
 import json
 import os
 import shutil
 import time
-# from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from miniharness.session import Session
+
+__all__ = [
+    "LOG_FORMAT",
+    "LOG_VERSION",
+    "LEGACY_LOG_VERSION",
+    "log_filename",
+    "translate",
+    "read_log",
+    "Store",
+    "PersistenceManager",
+]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 事件日志的物理形态与格式版本
+# ═══════════════════════════════════════════════════════════════
+LOG_FORMAT = "miniharness-session-log"
+LOG_VERSION = 1                 # 当代版本：写入只发布它
+LEGACY_LOG_VERSION = 0          # v0 = messages.json：消息数组，无 header、无 seq
+
+META_FILE = "meta.json"
+TRACES_FILE = "traces.json"
+LEGACY_MESSAGES_FILE = "messages.json"
+MIGRATED_SUFFIX = ".migrated"
+
+
+def log_filename(version: int = LOG_VERSION) -> str:
+    """日志文件按格式代际命名：写入只发布当代版本，旧代际只作只读迁移源。"""
+    return f"events.v{version}.jsonl"
+
+
+def _v0_to_v1(records: list[dict]) -> list[dict]:
+    """v0（消息数组）→ v1（事件日志）：逆投影成带单调序号的事件。"""
+    return Session.session_from_messages(records).events
+
+
+_MIGRATIONS: dict[int, Callable[[list[dict]], list[dict]]] = {LEGACY_LOG_VERSION: _v0_to_v1}
+
+
+def translate(records: list[dict], version: int) -> list[dict]:
+    """相邻版本迁移链：把 `version` 代的记录逐级翻译成当代事件日志。
+
+    高于当代的版本一律拒绝——宁可报错，也不按旧语义误读新记录。
+    """
+    if version > LOG_VERSION:
+        raise ValueError(f"日志版本 v{version} 高于本实现支持的 v{LOG_VERSION}，拒绝误读")
+    while version < LOG_VERSION:
+        step = _MIGRATIONS.get(version)
+        if step is None:
+            raise ValueError(f"缺少 v{version} → v{version + 1} 的迁移步骤")
+        records, version = step(records), version + 1
+    return records
+
+
+def read_log(path: Path) -> tuple[int, list[dict]]:
+    """读一份日志，返回 `(格式版本, 事件记录)`；版本取自 header（权威），不翻译、不改写。
+
+    首行必须是 header；完整记录的行必然以 `\\n` 结尾，所以崩溃写残的**最后一行**
+    允许解析失败并被丢弃（它不是一条已落盘的完整事件），中间的坏行是真损坏，直接报错。
+    """
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError(f"日志 {path.name} 为空：缺少 header")
+    try:
+        header = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"日志 {path.name} 的 header 无法解析：{exc}") from exc
+    if header.get("format") != LOG_FORMAT:
+        raise ValueError(f"日志 {path.name} 不是 {LOG_FORMAT} 格式")
+    version = header.get("version")
+    if not isinstance(version, int):
+        raise ValueError(f"日志 {path.name} 的 header 缺少整数 version")
+
+    records: list[dict] = []
+    for number, line in enumerate(lines[1:], start=2):
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            if number == len(lines):     # 写残的最后一行：未落盘的完整事件，丢弃
+                break
+            raise ValueError(f"日志 {path.name} 第 {number} 行损坏") from None
+    return version, records
 
 
 # ═══════════════════════════════════════════════════════════════
 # 第三部分：持久化后端
 # ═══════════════════════════════════════════════════════════════
 class Store:
-    """JSON 文件存储 —— 可替换为 SQLite / Redis / S3"""
+    """会话存储 —— 目录布局 + 事件日志的追加式落盘（可替换为 SQLite / Redis / S3）。
+
+    「已落盘的最后一个 seq」是水位：只把高于它的事件追加进当代日志，重复调用幂等。
+    """
 
     def __init__(self, dir_path: str = "./agent_sessions"):
         self.dir = Path(dir_path)
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._written: dict[str, int] = {}      # 每会话已落盘的最后一个 seq
+
+    def _session_dir(self, session_id: str, create: bool = False) -> Path:
+        session_dir = self.dir / session_id
+        if create:
+            session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir
 
     def _path(self, session_id: str, filename: str) -> Path:
-        session_dir = self.dir / session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
-        return session_dir / filename
+        return self._session_dir(session_id, create=True) / filename
 
-    # ── 读写 ──
+    # ── 元数据读写（沿用 legacy 的原子 JSON 落盘） ──
     def save(self, session_id: str, filename: str, data: Any) -> None:
         path = self._path(session_id, filename)
         tmp = path.with_suffix(".tmp")
@@ -31,11 +138,121 @@ class Store:
         tmp.replace(path)  # 原子写入，防止写一半崩溃
 
     def load(self, session_id: str, filename: str) -> Any:
-        path = self._path(session_id, filename)
+        path = self._session_dir(session_id) / filename
         if not path.exists():
             return None
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
+    # ── 事件日志 ──
+    def log_path(self, session_id: str, version: int = LOG_VERSION,
+                 create: bool = False) -> Path:
+        return self._session_dir(session_id, create=create) / log_filename(version)
+
+    def load_log(self, session_id: str) -> list[dict]:
+        """读会话的事件日志（已翻译成当代版本）；没有日志则为空。
+
+        当代日志优先；没有它时依次尝试更早代际的日志文件与 v0 的 `messages.json`，
+        都经迁移链翻译——旧会话因此仍可恢复。当代文件若没有完整的 header（首个 flush
+        落盘到一半就崩了），按「整份都没落盘过」处理：既不当作日志读，也不挡住后备迁移源。
+        """
+        path = self.log_path(session_id)
+        if _has_complete_header(path):
+            version, records = self._read_generation(path)
+            return translate(records, version)
+        for older in self._older_logs(session_id):
+            version, records = self._read_generation(older)
+            return translate(records, version)
+        legacy = self._session_dir(session_id) / LEGACY_MESSAGES_FILE
+        if legacy.exists():
+            return translate(json.loads(legacy.read_text(encoding="utf-8")), LEGACY_LOG_VERSION)
+        return []
+
+    def _read_generation(self, path: Path) -> tuple[int, list[dict]]:
+        """读一份代际日志：文件名与 header 声明的版本必须一致，否则拒绝误读。"""
+        version, records = read_log(path)
+        if _version_of(path) != version:
+            raise ValueError(
+                f"日志 {path.name} 的 header 版本 v{version} 与文件名不一致，拒绝误读")
+        return version, records
+
+    def append_log(self, session_id: str, events: list[dict],
+                   created: str | None = None) -> int:
+        """把尚未落盘的事件追加进当代日志，返回写入条数。
+
+        写前先看盘上有什么：盘上有更高代际的日志就拒绝写入（宁可报错，也不改名降级、
+        覆盖更高版本的历史）；当代日志若没有完整可解析的 header（首个 flush 落盘到一半
+        就崩了），整份视同没落过盘并重写 header。首次写入补 header，并把本会话的旧格式
+        记录标记为已迁移（改名不删档）；写入后 fsync：返回时事件确在盘上。写残的尾行在
+        写前修掉，不留半条记录。
+        """
+        self._refuse_newer_generation(session_id)
+        watermark = self._watermark(session_id)
+        pending = [event for event in events if event.get("seq", 0) > watermark]
+        path = self.log_path(session_id, create=True)
+        fresh = not _has_complete_header(path)
+        if fresh:
+            mode = "w"                 # 残 header / 0 字节：整份重写，不留半份 header
+        else:
+            mode = "a"
+            _drop_torn_tail(path)      # 写残的尾行不是已落盘的事件，写前修掉
+
+        with open(path, mode, encoding="utf-8") as f:
+            if fresh:
+                header = {"format": LOG_FORMAT, "version": LOG_VERSION,
+                          "session_id": session_id,
+                          "created": created or time.strftime("%Y-%m-%d %H:%M:%S")}
+                f.write(json.dumps(header, ensure_ascii=False) + "\n")
+            for event in pending:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        if pending:
+            self._written[session_id] = max(pending[-1]["seq"], watermark)
+        if fresh:
+            self._mark_migrated(session_id)
+        return len(pending)
+
+    def _watermark(self, session_id: str) -> int:
+        """已落盘的最后一个 seq（当代日志的最高 seq；没有当代日志则为 0）。"""
+        if session_id not in self._written:
+            path = self.log_path(session_id)
+            # 没有完整 header 的文件整份都没落过盘：不能拿它当水位，也读不了它
+            records = read_log(path)[1] if _has_complete_header(path) else []
+            self._written[session_id] = max((r.get("seq", 0) for r in records), default=0)
+        return self._written[session_id]
+
+    def _refuse_newer_generation(self, session_id: str) -> None:
+        """写前校验既有代际：盘上有比当代更高的版本就拒绝写入。
+
+        更高版本只有未来的实现能解释：既不能改名降级（那会静默丢掉它的历史），也不能在它
+        旁边另写一份旧代际（两份日志谁权威就说不清了）。
+        """
+        for path in self._older_logs(session_id):
+            version = _version_of(path)
+            if version > LOG_VERSION:
+                raise ValueError(
+                    f"日志 {path.name} 的版本 v{version} 高于本实现支持的 v{LOG_VERSION}，"
+                    f"拒绝写入以免覆盖更高版本的历史")
+
+    def _older_logs(self, session_id: str) -> list[Path]:
+        """更早代际的日志文件（按版本降序）：只在没有当代日志时作迁移源。"""
+        current = log_filename()
+        return sorted((p for p in self._session_dir(session_id).glob("events.v*.jsonl")
+                       if p.name != current),
+                      key=_version_of, reverse=True)
+
+    def _mark_migrated(self, session_id: str) -> None:
+        """迁移落定：旧格式记录改名 `*.migrated`，此后只有当代日志是权威源。
+
+        只改名不删除——旧记录留档可查，但不再被读，也不再是「并行的模型可见历史」。
+        """
+        session_dir = self._session_dir(session_id)
+        stale = self._older_logs(session_id) + [session_dir / LEGACY_MESSAGES_FILE]
+        for path in stale:
+            if path.exists():
+                path.replace(path.with_name(path.name + MIGRATED_SUFFIX))
 
     # ── 会话管理 ──
     def list_sessions(self) -> list[dict]:
@@ -43,7 +260,7 @@ class Store:
         for d in sorted(self.dir.iterdir(), reverse=True):
             if not d.is_dir():
                 continue
-            meta = self.load(d.name, "meta.json") or {}
+            meta = self.load(d.name, META_FILE) or {}
             sessions.append({
                 "id":            d.name,
                 "created":       meta.get("created", ""),
@@ -54,6 +271,7 @@ class Store:
         return sessions
 
     def delete_session(self, session_id: str) -> bool:
+        self._written.pop(session_id, None)
         path = self.dir / session_id
         if path.exists():
             shutil.rmtree(path)
@@ -61,11 +279,55 @@ class Store:
         return False
 
 
+def _has_complete_header(path: Path) -> bool:
+    """文件是否已经落下一份完整可解析的 header（读与写都据此判「整份落过盘没有」）。
+
+    `open(path, "a")` 会先创建文件，所以「文件存在」不等于「落过盘」：首个 flush 在写出
+    header 之前崩溃，盘上留下的就是 0 字节或半行 header。写入按顺序落盘，因此没有完整
+    header 的文件里也不会有完整的事件——按「整份都没落盘过」处理是安全的。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first_line = f.readline()
+    except OSError:
+        return False
+    if not first_line.endswith("\n"):       # 半行 header：还没写完，不算数
+        return False
+    try:
+        header = json.loads(first_line)
+    except json.JSONDecodeError:
+        return False
+    return (isinstance(header, dict) and header.get("format") == LOG_FORMAT
+            and isinstance(header.get("version"), int))
+
+
+def _version_of(path: Path) -> int:
+    """从代际文件名 `events.v<N>.jsonl` 取出版本号。"""
+    return int(path.name[len("events.v"):-len(".jsonl")])
+
+
+def _drop_torn_tail(path: Path) -> None:
+    """写前修掉写残的尾行：完整记录必然以 `\\n` 结尾，没结尾的那段不是已落盘的事件。"""
+    if path.stat().st_size == 0:
+        return
+    with open(path, "rb") as f:
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return
+    data = path.read_bytes()
+    path.write_bytes(data[:data.rfind(b"\n") + 1])   # 0 表示整份文件只有一条残行：截到开头
+
+
 # ═══════════════════════════════════════════════════════════════
 # 第四部分：持久化管理器
 # ═══════════════════════════════════════════════════════════════
-
 class PersistenceManager:
+    """会话持久化：事件日志是权威源，模型可见内容只能由它重放重建。
+
+    - `save_session` / `append_events` 只把尚未落盘的事件追加进当代日志（幂等）；
+    - `load_session` / `load_events` 读日志，必要时把旧格式翻译成当代版本；
+    - `summary` / `active_skills` 仍暂存 `meta.json`（把它们也变成可重放事件是 T3 的工作）。
+    """
 
     def __init__(self, store: Store | None = None):
         self.store = store or Store()
@@ -77,40 +339,44 @@ class PersistenceManager:
     # ── 保存 ──
     def save_session(
         self, session_id: str,
-        messages: list[dict], summary: str,
+        events: list[dict], summary: str,
         runs: list[dict], active_skills: list[str],
         last_user_input: str = "",
-    ) -> None:
+    ) -> int:
+        """落盘一次：事件进当代日志，随后刷新 meta / traces。返回本次写入的事件条数。"""
         old_meta = self._load_meta(session_id)
-        self.store.save(session_id, "messages.json", messages)
-        self.store.save(session_id, "traces.json", runs)
-        self.store.save(session_id, "meta.json", {
+        written = self.store.append_log(session_id, events, created=old_meta.get("created"))
+        self.store.save(session_id, TRACES_FILE, runs)
+        self.store.save(session_id, META_FILE, {
             "created":        old_meta.get("created") or time.strftime("%Y-%m-%d %H:%M:%S"),
             "updated":        time.strftime("%Y-%m-%d %H:%M:%S"),
             "last_message":   last_user_input[:100],
-            "message_count":  len(messages),
+            # 展示用的派生索引：由日志投影算出，可随时重建
+            "message_count":  len(Session(events=list(events)).derive_messages()),
             "summary":        summary,
             "active_skills":  active_skills,
         })
+        return written
 
-    def save_messages(self, session_id: str, messages: list[dict]) -> None:
-        """仅保存 messages —— 高频操作，轻量"""
-        self.store.save(session_id, "messages.json", messages)
+    def append_events(self, session_id: str, events: list[dict]) -> int:
+        """只把事件追加进当代日志 —— 高频操作，轻量（meta / traces 不动）"""
+        return self.store.append_log(session_id, events)
 
     # ── 加载 ──
     def load_session(self, session_id: str) -> dict:
         return {
-            "messages": self.store.load(session_id, "messages.json") or [],
+            "events": self.load_events(session_id),
             "summary": self._load_meta(session_id).get("summary", ""),
             "active_skills": self._load_meta(session_id).get("active_skills", []),
-            "runs": self.store.load(session_id, "traces.json") or [],
+            "runs": self.store.load(session_id, TRACES_FILE) or [],
         }
 
-    def load_messages(self, session_id: str) -> list[dict]:
-        return self.store.load(session_id, "messages.json") or []
+    def load_events(self, session_id: str) -> list[dict]:
+        """重放源：会话的完整事件日志（旧格式已翻译成当代版本）。"""
+        return self.store.load_log(session_id)
 
     def _load_meta(self, session_id: str) -> dict:
-        return self.store.load(session_id, "meta.json") or {}
+        return self.store.load(session_id, META_FILE) or {}
 
     # ── 会话管理 ──
     def list_sessions(self) -> list[dict]:
@@ -118,6 +384,7 @@ class PersistenceManager:
 
     def delete_session(self, session_id: str) -> bool:
         return self.store.delete_session(session_id)
+
 
 # ═══════════════════════════════════════════════════════════════
 # 第八部分：辅助接口
@@ -131,5 +398,3 @@ def list_sessions(store_dir: str = "./agent_sessions") -> list[dict]:
 def delete_session(session_id: str, store_dir: str = "./agent_sessions") -> bool:
     """删除指定会话"""
     return Store(store_dir).delete_session(session_id)
-
-

@@ -17,9 +17,9 @@
 
 | 族 | 职责 | 权威包地图 |
 | --- | --- | --- |
-| `miniharness/` | 骨架：低频的契约与运行时（事件原语、会话日志、工具/LLM 契约、零策略循环） | [`miniharness/README.md`](../miniharness/README.md) |
+| `miniharness/` | 骨架：低频的契约与运行时（事件原语、会话日志、工具/LLM/进程 seam 的契约、零策略循环） | [`miniharness/README.md`](../miniharness/README.md) |
 | `capabilities/` | 能力族：骨架之上的策略，每个能力按角色与变化速率拆包 | [`capabilities/README.md`](../capabilities/README.md) |
-| `providers/` | 后端族：骨架 seam 的实现（LLM 采样） | [`providers/README.md`](../providers/README.md) |
+| `providers/` | 后端族：骨架 seam 的实现（LLM 采样、受管范围的平台后端） | [`providers/README.md`](../providers/README.md) |
 | `app/` | 装配族：把骨架 / 能力 / 后端装成可运行的应用与入口 | [`app/README.md`](../app/README.md) |
 | `tests/` | 测试族：跨包集成集中于此 | [`tests/README.md`](../tests/README.md) |
 
@@ -68,7 +68,8 @@ flowchart TB
 - **只向下**：`app` → `capabilities` / `providers` → `miniharness`。下层**不认识**上层：
   骨架里没有 import 任何 `capabilities` / `providers` / `app`。
 - **消费方只依赖契约**：`miniharness.loop` 依赖 `session` / `tools.runtime` / `llm.contract`，
-  不认识任何策略插件与后端；`providers.deepseek` 只依赖 `llm.contract` 与 `core`。
+  不认识任何策略插件与后端；`providers.deepseek` 只依赖 `llm.contract` 与 `core`，
+  `providers.process` 只依赖 `process.contract` 与 `core`。
 - **契约不反向依赖实现**：`capabilities/<能力>/definition/` 不 import 同能力的 `provider`；
   `miniharness.tools.contract` 不 import `miniharness.tools.runtime`。
 - **能力之间**：可以依赖对方的**契约**，不要依赖对方的实现。确有实现级协同时，
@@ -145,7 +146,7 @@ T1 落位时这两条**只做到了一半**，如实记在这里，不当作已�
 | --- | --- |
 | `capabilities.compaction.definition` | `CompactionConfig.max_tokens` / `keep_last_n` 等阈值，`ContextManager._generate_summary` 的摘要提示词与切分 / 增量摘要逻辑 |
 | `capabilities.retry.definition` | `is_retryable` 的状态码与错误码判定表、`with_retry` 的退避循环 |
-| `capabilities.persistence.definition` | `Store` 的 JSON 落盘实现（目录布局、`messages.json` / `meta.json` 读写） |
+| `capabilities.persistence.definition` | 事件日志的落盘实现（目录布局、`events.v<N>.jsonl` 追加写与版本迁移、`meta.json` / `traces.json` 读写） |
 | `capabilities.validation.definition` | `validate_schema` / `validate_output` / `sanitize_output` 的校验与脱敏实现 |
 | `capabilities.skills.definition` | `SkillManager` 的注册 / 装载 / 卸载实现 |
 | `capabilities.timeout.definition` | `call_with_timeout` 的线程 + join 超时实现 |

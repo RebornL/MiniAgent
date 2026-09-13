@@ -1,7 +1,7 @@
 """app.assembly —— 装配：把骨架、能力与后端装成 harness。
 
 `build_harness()` 装配 Session + 工具 + LLM provider + 策略插件 + 日志消费者；
-`resume_session()` 在其上还原 messages / summary / active_skills 并续跑一轮。
+`resume_session()` 在其上重放事件日志、还原 summary / active_skills 并续跑一轮。
 
 策略全挂在事件 seam 上（Loop 零改动）：压缩 → `agent/pre-step`，重试 / 超时 → `tools/execute`，
 输出校验 → `tools/post-execute`，终结工具 → `agent/post-tool`，持久化 / 追踪 → Session 日志订阅。
@@ -131,13 +131,13 @@ def _open_harness(
     base_system_prompt: str,
     llm: LLM | None = None,
 ) -> Loop:
-    """装配 harness 并接上持久化状态：messages / summary / active_skills 一并还原。"""
+    """装配 harness 并接上持久化状态：先重放事件日志，再还原 summary / active_skills。"""
     ctx, session, loop = build_harness(model=model, session_id=session_id,
                                        store_dir=store_dir, client=client, llm=llm,
                                        base_system_prompt=base_system_prompt)
     state = pm.load_session(session_id)
-    if state["messages"]:
-        session.restore(state["messages"])
+    if state["events"]:
+        session.replay(state["events"])
     if state["summary"]:
         ctx.get("compaction").context.restore(state["summary"])
     skills = ctx.get("skills")
@@ -159,9 +159,9 @@ def resume_session(
     client: OpenAI | None = None,
     llm: LLM | None = None,
 ) -> str:
-    """恢复历史会话并继续对话：装配 harness + 还原 messages/summary/active_skills 后跑一轮。"""
+    """恢复历史会话并继续对话：重放日志 + 还原 summary/active_skills 后跑一轮。"""
     pm = PersistenceManager(Store(store_dir))
-    if not pm.load_messages(session_id):
+    if not pm.load_events(session_id):
         return f"❌ 会话 {session_id} 不存在或为空"
     loop = _open_harness(pm, session_id, model=model, store_dir=store_dir,
                          client=client, llm=llm,

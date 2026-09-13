@@ -101,7 +101,7 @@ def chat_loop(
                 continue
 
             state = pm.load_session(new_id)
-            if not state["messages"]:
+            if not state["events"]:
                 print(f"❌ 会话 {new_id} 不存在或为空")
                 continue
 
@@ -109,7 +109,7 @@ def chat_loop(
             loop = assembly._open_harness(
                 pm, session_id, model=model, store_dir=store_dir,
                 client=client, base_system_prompt=base_system_prompt)
-            print(f"✅ 已切换到 {session_id}（{len(state['messages'])} 条消息）")
+            print(f"✅ 已切换到 {session_id}（{len(state['events'])} 条事件）")
 
         # ── 正常对话 ──
         else:

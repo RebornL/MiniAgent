@@ -63,6 +63,7 @@ MiniAgent/
 │   │   ├── contract/       #   ToolDefinition（工具契约）
 │   │   └── runtime/        #   ToolRuntime（执行流水线；+ test_pipeline.py）
 │   ├── llm/contract/       #   LLM（LLM 契约）
+│   ├── process/contract/   #   ManagedRange / ProcessSeam（受管范围契约）
 │   └── loop/               #   Loop：驱动 + 派发事件（零策略）
 ├── capabilities/           # 能力族：契约 / 实现 / 消费方三分
 │   ├── README.md           #   包地图：每个能力的三个角色落在哪个包
@@ -78,7 +79,8 @@ MiniAgent/
 ├── providers/              # 后端族：骨架 seam 的实现
 │   ├── README.md           #   本族包地图
 │   ├── deepseek/           #   真实 LLM provider（DeepSeek / OpenAI 兼容）
-│   └── mock/               #   MockLLM（离线 provider）
+│   ├── mock/               #   MockLLM（离线 provider）
+│   └── process/            #   受管范围的平台后端（POSIX 信号组 / Windows Job Object）
 ├── app/                    # 装配族：装配 + 入口 + CLI
 │   ├── README.md           #   本族包地图
 │   ├── config.py           #   config.json 的惰性读取

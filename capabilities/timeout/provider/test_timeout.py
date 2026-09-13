@@ -23,7 +23,7 @@ def test_timeout_plugin_reports_timeout_as_error():
         return "慢"
 
     _, runtime = _pipeline(ToolTimeoutPlugin(default_ms=1000),
-                           ToolDefinition("slow", "", {}, slow, timeoutMs=50))
+                           ToolDefinition("slow", "", {}, slow, timeout_ms=50))
     result = runtime.run({"id": "c1", "name": "slow", "args": {}})
 
     assert result["status"] == "error"
@@ -31,7 +31,7 @@ def test_timeout_plugin_reports_timeout_as_error():
 
     # 未超时的调用不受影响，仍是 ok
     _, ok_runtime = _pipeline(ToolTimeoutPlugin(default_ms=1000),
-                              ToolDefinition("fast", "", {}, lambda a: "快", timeoutMs=1000))
+                              ToolDefinition("fast", "", {}, lambda a: "快", timeout_ms=1000))
     ok = ok_runtime.run({"id": "c2", "name": "fast", "args": {}})
     assert ok["status"] == "ok" and ok["content"] == "快"
 

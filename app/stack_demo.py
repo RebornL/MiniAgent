@@ -79,7 +79,7 @@ def _demo() -> None:
     print("traces->", [(s.type, s.output if s.type == "tool_call" else "…")
                        for s in (tracer.run.children if tracer.run else [])])
     print("saved ->", persistence.saves, "次；",
-          PersistenceManager(Store(workdir)).load_messages("demo"))
+          "日志", len(PersistenceManager(Store(workdir)).load_events("demo")), "条事件")
 
 
 if __name__ == "__main__":
