@@ -138,31 +138,32 @@ T1 落位时这两条**只做到了一半**，如实记在这里，不当作已�
 
 ### 9.1 `definition/` 由 legacy 模块整体搬移，类型与实现没有分家
 
-`capabilities/*/definition/` 的 5 个包，全部来自 legacy 顶层语义模块的**整体搬移**
-（T1 的 `git mv` 重命名记录：`RetryFunc.py` / `SkillManager.py` / `CallFunc.py` /
-`AgentTrace.py` / `Structure.py` → 各自的
+`capabilities/*/definition/` 的 4 个包，全部来自 legacy 顶层语义模块的**整体搬移**
+（T1 的 `git mv` 重命名记录：`RetryFunc.py` / `CallFunc.py` / `AgentTrace.py` /
+`Structure.py` → 各自的
 `capabilities/<能力>/definition/__init__.py`）。搬进去的是**类型与实现一起**：
 
 | `definition/` 包 | 随搬移一并进入的**实现**（不只是类型） |
 | --- | --- |
 | `capabilities.retry.definition` | `is_retryable` 的状态码与错误码判定表、`with_retry` 的退避循环 |
 | `capabilities.validation.definition` | `validate_schema` / `validate_output` / `sanitize_output` 的校验与脱敏实现 |
-| `capabilities.skills.definition` | `SkillManager` 的注册 / 装载 / 卸载实现 |
 | `capabilities.timeout.definition` | `call_with_timeout` 的线程 + join 超时实现 |
 | `capabilities.tracing.definition` | `AgentTracer` 的 span 累积与 LLM 调用记录实现 |
 
-### 9.2 persistence / compaction 已拆成内容分离，其余包仍是中间态
+### 9.2 persistence / compaction / skills 已拆成内容分离，其余包仍是中间态
 
-AC3「契约包与高频变动包分离」在 `capabilities.persistence` 与 `capabilities.compaction`
+AC3「契约包与高频变动包分离」在 `capabilities.persistence`、`capabilities.compaction` 与 `capabilities.skills`
 已成立为**内容分离**（T12 拆分）：`persistence` 的 `definition/` 只留低频契约——格式版本
 词汇（`LOG_FORMAT` / `LOG_VERSION` / `LEGACY_LOG_VERSION` / `log_filename`）与磁盘语义；
 迁移链、日志读写、`Store` / `PersistenceManager` 全部落在 `provider/`。`compaction` 的
 `definition/` 只留 `compaction_summaries`（从事件日志投影摘要链）；阈值、摘要提示词与
-切分策略连同 `CompactionConfig` / `ContextManager` 全部落在 `provider/`。两者的依赖方向
-均为 `provider → definition`。其余 5 个包仍是**中间态**：`definition/` 与 `provider/`
+切分策略连同 `CompactionConfig` / `ContextManager` 全部落在 `provider/`。`skills` 的
+`definition/` 只留 `skill/*` 事件词汇、`active_skills` 投影与 `Skill` 形状，`SkillManager`
+的注册 / 装载 / 卸载实现全部落在 `provider/`。三者的依赖方向
+均为 `provider → definition`。其余 4 个包仍是**中间态**：`definition/` 与 `provider/`
 确实是两个包，`provider` 向下依赖 `definition`，成立的形式只是**包级别的层级分离**——
-**内容上并未分离**：改一句 validation 的脱敏规则、调一次 skills 的装载参数、换一条
-retry 的退避判定，动的仍然是 `definition/` 包，也就是被当作契约的那个包。
+**内容上并未分离**：改一句 validation 的脱敏规则、换一条 retry 的退避判定、动一次
+tracing 的 span 记录，动的仍然是 `definition/` 包，也就是被当作契约的那个包。
 这正是 §1 第 3 条要避免的情形。
 
 ### 9.3 真正的契约 / 实现二分是独立工作，不属 T1
@@ -175,7 +176,8 @@ T1 的验收只有一条：**纯搬移**，只改文件位置与 import，行为
 拆分按 churn 与体量逐包推进：`persistence` 已在本票（T12）完成——`definition` 从
 492 行收窄为契约 42 行，实现并入 `provider`（563 行，含原有 `PersistenceConsumer`）；
 `compaction` 已在本票（T12）完成——`definition` 从 214 行收窄为契约 27 行，实现并入
-`provider`（含原有 `CompactionConfig` / `ContextManager`）。剩 5 个待拆：`skills`
-（1 / 143）、`retry`（1 / 108）、`validation`（0 / 240）、`tracing`（0 / 97）、
-`timeout`（0 / 40）——次数为 T1（`dfea59f`）以来该包被提交触碰的次数，行数为
-`definition/__init__.py` 现行行数。
+`provider`（含原有 `CompactionConfig` / `ContextManager`）；`skills` 已在本票（T12）
+完成——`definition` 从 143 行收窄为契约 50 行，实现并入 `provider`（323 行，含原有
+`SkillRegistry`）。剩 4 个待拆：`retry`（1 / 108）、`validation`（0 / 240）、
+`tracing`（0 / 97）、`timeout`（0 / 40）——次数为 T1（`dfea59f`）以来该包被提交触碰
+的次数，行数为 `definition/__init__.py` 现行行数。
