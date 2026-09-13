@@ -9,8 +9,7 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-from capabilities.compaction.definition import CompactionConfig, ContextManager
-from capabilities.compaction.provider import CompactionPlugin
+from capabilities.compaction.provider import CompactionConfig, CompactionPlugin, ContextManager
 from capabilities.final_output.provider import FinalOutputPlugin
 from miniharness.core import Context
 from miniharness.session import Session

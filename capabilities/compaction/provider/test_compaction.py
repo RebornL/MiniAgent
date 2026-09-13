@@ -5,8 +5,8 @@
 """
 from __future__ import annotations
 
-from capabilities.compaction.definition import CompactionConfig, compaction_summaries
-from capabilities.compaction.provider import CompactionPlugin
+from capabilities.compaction.definition import compaction_summaries
+from capabilities.compaction.provider import CompactionConfig, CompactionPlugin
 from miniharness.core import Context
 from miniharness.session import Session
 
