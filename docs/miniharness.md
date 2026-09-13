@@ -20,13 +20,17 @@
 
 ## 2. 工具执行流水线
 
-```
-tools/pre-execute (allow | deny | ask)   权限 / 审批
-  → tools/guard（单调：只能收紧）          不可反向放行
-  → tools/execute（around 包装）           超时 / 重试 / 计量
-  → tools/post-execute（接受 / 改写）      输出校验 / 提醒注入
-  → finalizeContent                       收敛出恒为 str 的 content
-  → tools/result                          不可变权威结果（仅 ok / error）
+```mermaid
+flowchart TB
+    A["tools/pre-execute<br/>allow / deny / ask"] -->|"权限 / 审批"| B["tools/guard<br/>单调：只能收紧"]
+    B --> C{"最终决策"}
+    C -->|"allow"| D["tools/execute<br/>around 包装：超时 / 重试 / 计量"]
+    C -->|"ask"| E["tools/approve"]
+    E --> C
+    C -->|"deny"| F["tool/denied<br/>工具体不执行，无权威结果"]
+    D --> G["tools/post-execute<br/>接受 / 改写：输出校验 / 提醒注入"]
+    G --> H["finalizeContent<br/>收敛出恒为 str 的 content"]
+    H --> I["tools/result<br/>不可变权威结果（仅 ok / error）"]
 ```
 
 `deny` 不产生权威结果：落 `tool/denied`、不发 `tools/result`、工具体不执行。
@@ -132,3 +136,95 @@ print([e["type"] for e in session.events])
 ```bash
 python -m pytest -q
 ```
+
+## 8. 设计图（mermaid）
+
+### 8.1 架构总览：谁依赖谁
+
+```mermaid
+flowchart TB
+    subgraph app["应用层（MiniAgent.py）"]
+        CL["chat_loop()"]
+        BH["build_harness()"]
+    end
+    subgraph core["骨架（miniharness.py）"]
+        CTX["Context<br/>服务注册表 + 事件总线"]
+        SESS["Session<br/>append-only 事件日志"]
+        LOOP["Loop<br/>驱动 + 派发事件"]
+        TRT["ToolRuntime<br/>工具执行流水线"]
+        LLMS["LLM<br/>能力 seam 契约"]
+    end
+    subgraph plugs["策略（miniharness_plugins.py）"]
+        PL1["CompactionPlugin<br/>SystemPromptPlugin"]
+        PL2["RetryPlugin<br/>ToolTimeoutPlugin"]
+        PL3["ValidationPlugin<br/>FinalOutputPlugin"]
+        PL4["PersistenceConsumer<br/>TraceConsumer"]
+        PL5["SkillRegistry"]
+    end
+    PROV["DeepSeekProvider"]
+    MOCK["MockLLM"]
+    BH --> CTX
+    CL --> LOOP
+    LOOP --> SESS
+    LOOP --> TRT
+    LOOP --> LLMS
+    PROV -.->|"实现"| LLMS
+    MOCK -.->|"实现"| LLMS
+    PL1 -.->|"订阅事件"| CTX
+    PL2 -.->|"订阅事件"| CTX
+    PL3 -.->|"订阅事件"| CTX
+    PL4 -.->|"订阅日志"| SESS
+    PL5 -->|"可逆注册"| TRT
+```
+
+### 8.2 一次 turn 的时序
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant L as Loop
+    participant S as Session
+    participant C as Context（事件总线）
+    participant M as LLM seam
+    participant T as ToolRuntime
+
+    U->>L: turn("6*7 是多少")
+    L->>S: append(turn/start)
+    L->>C: waterfall(agent/pre-step)
+    L->>S: append(user/message)
+    L->>S: derive_messages()（投影）
+    L->>M: complete(messages)
+    M-->>L: {text, tool_calls}
+    L->>S: append(assistant/message)
+    loop 批内每个 tool_call（保证配对完整）
+        L->>T: run(call)
+        T->>C: waterfall(tools/pre-execute → guard → execute → post-execute)
+        T-->>L: ok / error / denied
+        L->>S: append(tool/result 或 tool/denied)
+        L->>C: waterfall(agent/post-tool)
+    end
+    L->>S: append(turn/end)
+    L-->>U: 最终答案
+```
+
+### 8.3 事件日志与模型可见历史
+
+```mermaid
+flowchart LR
+    EV["Session 事件日志<br/>（append-only，唯一真相源）"] -->|"derive_messages()"| MSG["模型可见 messages<br/>system（仅最新一条，置顶）<br/>+ user / assistant / tool"]
+    MSG -->|"_wire_messages()"| WIRE["OpenAI 线格式<br/>→ DeepSeekProvider"]
+    MSG -.->|"session_from_messages()<br/>逆投影（恢复会话）"| EV
+    EV -->|"subscribe()"| CONS["日志消费者<br/>PersistenceConsumer / TraceConsumer"]
+```
+
+### 8.4 插件的依赖驱动激活
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : Context.load(plugin)
+    pending --> pending : inject 依赖未就绪
+    pending --> active : 依赖服务就绪
+    active --> [*] : unload / dispose（逆序撤销）
+```
+
+> 工具执行流水线的图形版见 §2；策略如何注入见 §5。
