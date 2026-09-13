@@ -27,7 +27,7 @@ from miniharness.tools.contract import CANCELLED, OK, TIMED_OUT, ToolDefinition
 from miniharness.tools.runtime import ToolRuntime
 from providers.process import SubprocessRange, SubprocessSeam
 from providers.process.probe import _alive, _assert_gone
-from tests.support import _shell_harness
+from tests.support import _shell_harness, _wait_until
 
 #: 与装配层同一份沙箱策略（`app.assembly.SHELL_ENV_ALLOWLIST`）：这里验的是装配后的行为。
 _POLICY = SandboxPolicy(env_allowlist=SHELL_ENV_ALLOWLIST)
@@ -77,13 +77,6 @@ def _run_call(runtime: ToolRuntime, results: list[dict], argv: list[str]) -> thr
         daemon=True)
     worker.start()
     return worker
-
-
-def _wait_until(predicate, timeout_s: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout_s
-    while not predicate():
-        assert time.monotonic() < deadline, "条件迟迟不成立"
-        time.sleep(0.02)
 
 
 def _write(tmp_path: Path, name: str, script: str) -> Path:

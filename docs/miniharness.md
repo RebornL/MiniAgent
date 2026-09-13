@@ -98,10 +98,32 @@ flowchart LR
 - **已启动的工具体跑到静止后才允许替换其结果**：先终止实体，再等它自己的等待返回，最后才用
   中止结局替换它本会产出的值。
 - **取消与超时同一条路径**，区别只在结局码。取消入口是 `ToolTimeoutPlugin.cancel()`
-  （同时以 `ctx.get("abort")` 暴露）。**本仓暂无取消源**——用户中断 / 回合放弃还没接线，没有谁
-  调用它；接上取消源是后续工作。
+  （同时以 `ctx.get("abort")` 暴露）。**取消源在装配层**：`app.cli.InterruptSource` 把
+  **回合执行期间**的 Ctrl-C 换成一次 `cancel()`（`chat_loop` 每轮用 `armed(ctx)` 划出这个
+  窗口）——正在跑的受管范围被终止、该回合以结构化的 `cancelled` 收尾，**聊天循环继续**；
+  `input()` 提示处的 Ctrl-C 不被接管，仍是退出（既有行为）。
+  取消源是**主线程上的信号处理**，而信号未必递到主线程（Windows 上实测：整段睡满时 0.5 秒
+  递到的信号要等时限到才被处理），所以等待者按片检查中止请求（`_WAIT_SLICE_S`）、本插件的锁
+  可重入——这两条是「接上取消源」的必要条件，不是另一套终止逻辑。
+  中断时刻可注入（`InterruptSource.interrupt()`），集成用例见 `tests/test_cli_cancel.py`。
+- **一次取消粘到本轮**（`capabilities.timeout.provider.TurnCancelPlugin`：**收尾是策略，落在
+  能力层**；`app.cli.InterruptSource` 只剩信号装配）。取消登记在 `ToolTimeoutPlugin` 上，回合
+  边界（`agent/pre-step`）清除；四个落点：
+  - `tools/guard`：本轮余下的工具调用一律 `deny`，**审批也不会被询问**。挂 guard 而不是
+    `tools/pre-execute`——后者是洋葱瀑布，审批策略对 `run_command` 直接给出 `ask`、不调
+    `next_`，挂在那里的守卫会被短路、永不被调用（`deny` 比 `ask` 更严，单调收紧的语义不变）。
+  - `tools/execute` 的**入口复查**：重试重入 `tools/execute` 是「重新进流水线」，不重跑
+    pre-execute / guard——退避期间到来的取消因此在这里收住，一个进程也不起。
+  - `agent/post-tool`：权威结果为 `cancelled` → 本轮就此收尾、不再采样。
+  - llm seam：取消之后模型**只回文本**时，那条文本换成取消说明（`⏹️ 已取消本轮：…`）——没有
+    工具调用的这一路，`agent/post-tool` 不会被派发，而 `Loop` 收到纯文本就自己写
+    `turn/end=done` 并把它当答案返回。`turn/end` 的词表归 `Loop`，策略不代写，所以这条路径的
+    收场是「`done` + 取消说明」：模型可见历史（日志里的 `assistant/message`）与用户看到的答复
+    都写着这轮是被人取消的，不是一次什么都没发生的正常收尾。
+  **没有命令在跑时**：取消请求无处可终止（`cancel()` 返回 False），本轮同样就此打住、不退出。
 - **每次尝试各有各的册**：`timed_out` 可重试（`capabilities.retry.definition.RETRYABLE_OUTCOMES`），
-  默认重试策略**会**重试它；重试的第 N 次重新起进程、重新登记，上一次的树早已终止，互不牵连。
+  默认重试策略**会**重试它；重试的第 N 次重新起进程、重新登记，上一次的树早已终止，互不牵连
+  （取消之后不会再有第 N 次：上面的入口复查把它收住了）。
 
 **剩余边界**：没有受管范围可终止的工具体（纯 Python 的慢工具）只能「停止等待」——Python 杀不掉
 线程，被放弃的工具体仍会跑到底，它已产生的副作用（例如慢写文件留下的半成品）**不会回滚**。
@@ -201,6 +223,15 @@ class AuditPlugin(Plugin):
 只有 POSIX 后端有**（Windows 的 Job Object 一次强杀到底），它的真实触发用例带
 `skipif(os.name == "nt")`，只在 POSIX 上实跑。核心原语的效应栈语义在
 `miniharness/core/test_context.py` 验。
+
+**取消源**（`Loop` 之外的触发条件）在 `tests/test_cli_cancel.py`：驱动真实的 `chat_loop`，
+中断时刻可注入（`InterruptSource.interrupt()`），进程树由操作系统独立确认；另有一条真实
+SIGINT 用例（`signal.raise_signal`，由另一个线程递出——正是平台把信号递进来的样子）与一条
+真实终端里的 `python -m app` 手工核实。取消粘到本轮的三个落点各有用例：守卫跑在审批**之前**
+（本轮已取消时审批名单里的工具既不执行、也不弹框）、退避期间的中断之后重试不再起进程（替身
+记 spawn 次数，进程由系统侧确认）、取消之后模型只回文本时不给一次看起来正常的 `done`。三条
+都做过**失败注入**：把守卫放回 `tools/pre-execute`、去掉 `tools/execute` 的入口复查，对应用例
+立即变红。
 
 ## 7. 运行
 

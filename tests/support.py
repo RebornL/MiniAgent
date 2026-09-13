@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+import time
 
 from capabilities.shell.definition import RUN_COMMAND_NAME, RUN_COMMAND_TOOL
 from capabilities.shell.provider import ShellTool
@@ -45,6 +46,14 @@ def _assemble(llm: MockLLM, *, plugins=(), tools=(), session: Session | None = N
 def _marker_command(marker) -> list[str]:
     """一条「执行了就留下文件」的命令：用来证明工具体到底跑没跑（沙箱 / shell 集成共用）。"""
     return [sys.executable, "-c", f"open(r'{marker}', 'w', encoding='utf-8').write('ran')"]
+
+
+def _wait_until(predicate, timeout_s: float = 20.0) -> None:
+    """轮询等待条件成立，超时即断言失败——「等现场出现」的集成测试共用这一份。"""
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        assert time.monotonic() < deadline, "条件迟迟不成立"
+        time.sleep(0.02)
 
 
 def _shell_harness(*, seam: SubprocessSeam | None = None,

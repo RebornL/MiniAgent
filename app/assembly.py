@@ -6,7 +6,8 @@
 
 策略全挂在事件 seam 上（Loop 零改动）：压缩 → `agent/pre-step`，重试 / 超时 → `tools/execute`，
 审批 → `tools/pre-execute`（只对 `run_command`），输出校验 → `tools/post-execute`，
-终结工具 → `agent/post-tool`，持久化 / 追踪 → Session 日志订阅。
+终结工具 → `agent/post-tool`，取消粘到本轮 → `tools/guard` / `agent/post-tool` / llm seam
+（`TurnCancelPlugin`），持久化 / 追踪 → Session 日志订阅。
 进程边界另有两个独立 seam：沙箱（包装 argv，不可用即 fail-closed）与受管范围（起进程 /
 等退出 / 终止），两者都在这里装配，谁都不认识策略。
 """
@@ -24,7 +25,7 @@ from capabilities.shell.provider import ShellTool
 from capabilities.skills.consumer import SystemPromptPlugin
 from capabilities.skills.definition import Skill
 from capabilities.skills.provider import SkillRegistry
-from capabilities.timeout.provider import ToolTimeoutPlugin
+from capabilities.timeout.provider import ToolTimeoutPlugin, TurnCancelPlugin
 from capabilities.tracing.provider import TraceConsumer
 from capabilities.validation.provider import ValidationPlugin
 from miniharness.core import Context
@@ -118,7 +119,8 @@ def build_harness(
 
     策略全挂在事件 seam 上（Loop 零改动）：压缩 → `agent/pre-step`，
     重试/超时 → `tools/execute`，输出校验 → `tools/post-execute`，
-    终结工具 → `agent/post-tool`，持久化/追踪 → Session 日志订阅。
+    终结工具 → `agent/post-tool`，取消粘到本轮 → `tools/guard` / `agent/post-tool` / llm seam
+    （`TurnCancelPlugin`；取消的**信号装配**仍归 CLI），持久化/追踪 → Session 日志订阅。
     工具不预注册：只随技能装载经 `SkillRegistry` 可逆注册（`unload_skill` 即撤销），
     与 legacy `get_active_tools()`（meta tools + 仅已激活技能的工具）一致。
     审批策略只覆盖 `run_command`（`ask`；没有审批者时默认拒绝，工具体不执行），其余工具的
@@ -141,6 +143,7 @@ def build_harness(
     ctx.load(CompactionPlugin())
     ctx.load(RetryPlugin())
     ctx.load(ToolTimeoutPlugin())
+    ctx.load(TurnCancelPlugin())      # 取消粘到本轮：guard 拒绝 + 收尾 + 纯文本不许蒙混收场
     ctx.load(ValidationPlugin())
     ctx.load(PermissionPlugin(approval_required={RUN_COMMAND_NAME}))
     ctx.load(FinalOutputPlugin(tools.OUTPUT_TOOL_NAMES))

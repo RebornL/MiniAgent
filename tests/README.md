@@ -13,7 +13,7 @@
 
 | 文件 | seam | 覆盖 |
 | --- | --- | --- |
-| `tests/support.py` | —— | 集成测试共享的装配 helper（`_assemble` / `_event_types` / `CALC_PARAMS` / `WRITE_PARAMS`），只服务本目录；**进程存活探针**（`_alive` / `_assert_gone`）不在本文件——它按「下层 helper 留下层」放在 `providers/process/probe.py`，由包内测试与集成测试共用**同一份实现** |
+| `tests/support.py` | —— | 集成测试共享的装配 helper（`_assemble` / `_marker_command` / `_shell_harness` / `_wait_until` / `CALC_PARAMS` / `WRITE_PARAMS`），只服务本目录；**进程存活探针**（`_alive` / `_assert_gone`）不在本文件——它按「下层 helper 留下层」放在 `providers/process/probe.py`，由包内测试与集成测试共用**同一份实现** |
 | `tests/fixtures/legacy-v0-session/` | —— | v0 落盘**形态**的样本（`messages.json` + `meta.json` 旁路）：结构与真实旧会话一致，**内容是合成的**（真实会话数据不入库，`agent_sessions/` 在 .gitignore 里、仓库公开） |
 | `tests/test_turn.py` | S2（turn 边界，集成） | 工具体执行与 `tool/result` 按序入日志、deny 的配对完整性、终结工具收尾本轮、持久化 / 追踪消费者接上日志（回合结束后磁盘上就是逐行可读的事件日志）、三个语义检查点在下一步之前已落盘且失败即 fail-closed、**只换插件就改变结局而 Loop 零改动** |
 | `tests/test_capabilities.py` | S2 + 契约等价 | 压缩达同样阈值才触发且摘要语义与契约包逐字一致；终结工具不再采样 |
@@ -22,6 +22,7 @@
 | `tests/test_app.py` | S2（装配） | `build_harness` 的工具懒注册与落盘、技能装载、`resume_session` 只靠重放日志恢复（压缩后的投影逐字一致、技能状态与领域提示仍在、`meta.json` 无 summary/active_skills 旁路）、真实 v0 旧会话迁移后技能工具已注册且摘要链非空、`meta.json` 不存模型可见内容的拷贝、全新 clone 上 `import app` 不读 config.json |
 | `tests/test_sandbox.py` | 沙箱 seam（装配 + 真实子进程） | `run_command` 先过沙箱：命令在收敛后的环境里跑（子进程拿到沙箱标记、拿不到父进程凭据）、退出与输出走同一条结果通道；**失败注入**——沙箱没装 / 装配后被卸载 / 拒绝服务时 `failed` 且命令真的没跑（marker 文件不存在），每处都附「装上可用沙箱后同一条命令 `ok` 且 marker 写入」的非空洞对照；装配层的 `build_harness` 装的确实是这个沙箱 |
 | `tests/test_cli_approval.py` | 审批闸门（装配 + CLI） | CLI 审批者裁决 `run_command`：请求展示完整 argv 与 cwd、放行才执行、拒绝沿用 `denied` 且工具体未执行、非交互输入（非 TTY / 管道 / EOF）默认拒绝、其它工具不经审批 |
+| `tests/test_cli_cancel.py` | 取消源（装配 + CLI + 真实子进程） | 回合执行期间的中断＝一次取消请求：长命令执行中注入中断 → 结构化 `cancelled`、整棵进程树（含后代）由**系统侧**独立确认真的没了、本回合不再采样、下一次调用照常跑真命令；真 SIGINT（`signal.raise_signal`，由另一线程递出）同样及时取消；`input()` 提示处的 Ctrl-C 仍是退出；没有命令在跑时只作用于当前回合（不再执行新的工具调用）且不退出；**取消粘到本轮**——本轮已取消时审批名单里的工具既不执行也不弹批准框（守卫挂在 `tools/guard`：挂 `tools/pre-execute` 会被审批策略的 `ask` 短路）、退避期间的中断之后重试不再起进程（记 spawn 次数 + 真实子进程）、取消之后模型只回文本时本轮以取消说明收场；边界态：中断在工具收尾之后到达（结果不改写，但本轮仍以取消收场）、连续两次中断幂等；SIGINT 处理只在回合执行期间装上、退出即还原。三条新用例都做过**失败注入**（守卫放回 pre-execute / 去掉 `tools/execute` 入口复查 → 对应红） |
 
 ## 运行
 
