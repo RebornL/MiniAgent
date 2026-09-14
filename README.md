@@ -71,8 +71,8 @@ MiniAgent/
 │   ├── persistence/        #   definition/ + provider/
 │   ├── retry/              #   definition/ + provider/（+ test_retry.py）
 │   ├── timeout/            #   definition/ + provider/（+ test_timeout.py）
-│   ├── validation/         #   definition/ + provider/（+ test_validation.py）
-│   ├── tracing/            #   definition/ + provider/
+│   ├── validation/         #   provider/（无稳定契约符号，整体并入——T12）
+│   ├── tracing/            #   provider/（无稳定契约符号，整体并入——T12）
 │   ├── skills/             #   definition/ + provider/（+ test_skills.py）+ consumer/
 │   ├── permission/         #   provider/
 │   └── final_output/       #   provider/
