@@ -138,14 +138,13 @@ T1 落位时这两条**只做到了一半**，如实记在这里，不当作已�
 
 ### 9.1 `definition/` 由 legacy 模块整体搬移，类型与实现没有分家
 
-`capabilities/*/definition/` 的 3 个包，全部来自 legacy 顶层语义模块的**整体搬移**
-（T1 的 `git mv` 重命名记录：`CallFunc.py` / `AgentTrace.py` /
-`Structure.py` → 各自的
-`capabilities/<能力>/definition/__init__.py`）。搬进去的是**类型与实现一起**：
+`capabilities/*/definition/` 的 2 个包，全部来自 legacy 顶层语义模块的**整体搬移**
+（T1 的 `git mv` 重命名记录：`CallFunc.py` / `AgentTrace.py` → 各自的
+`capabilities/<能力>/definition/__init__.py`；第三个 `Structure.py` 已随本票 T12 的
+validation 拆分整体并入 `provider` 而撤销，见 §9.3）。搬进去的是**类型与实现一起**：
 
 | `definition/` 包 | 随搬移一并进入的**实现**（不只是类型） |
 | --- | --- |
-| `capabilities.validation.definition` | `validate_schema` / `validate_output` / `sanitize_output` 的校验与脱敏实现 |
 | `capabilities.timeout.definition` | `call_with_timeout` 的线程 + join 超时实现 |
 | `capabilities.tracing.definition` | `AgentTracer` 的 span 累积与 LLM 调用记录实现 |
 
@@ -161,9 +160,10 @@ AC3「契约包与高频变动包分离」在 `capabilities.persistence`、`capa
 的注册 / 装载 / 卸载实现全部落在 `provider/`。`retry` 的 `definition/` 只留中止结局码契约
 （`RETRYABLE_OUTCOMES` / `is_retryable_outcome`），`with_retry` 的退避循环与参数默认值、
 `is_retryable` 的瞬时故障判定全部落在 `provider/`。四者的依赖方向
-均为 `provider → definition`。其余 3 个包仍是**中间态**：`definition/` 与 `provider/`
-确实是两个包，`provider` 向下依赖 `definition`，成立的形式只是**包级别的层级分离**——
-**内容上并未分离**：改一句 validation 的脱敏规则、动一次 tracing 的 span 记录、动一次
+均为 `provider → definition`。`validation` 则**无稳定契约符号**，整体并入 `provider`
+（照 permission / final_output 先例不设 `definition/` 包）。其余 2 个包仍是**中间态**：
+`definition/` 与 `provider/` 确实是两个包，`provider` 向下依赖 `definition`，成立的形式
+只是**包级别的层级分离**——**内容上并未分离**：动一次 tracing 的 span 记录、动一次
 timeout 的超时实现，动的仍然是 `definition/` 包，也就是被当作契约的那个包。
 这正是 §1 第 3 条要避免的情形。
 
@@ -180,6 +180,7 @@ T1 的验收只有一条：**纯搬移**，只改文件位置与 import，行为
 `provider`（含原有 `CompactionConfig` / `ContextManager`）；`skills` 已在本票（T12）
 完成——`definition` 从 143 行收窄为契约 50 行，实现并入 `provider`（323 行，含原有
 `SkillRegistry`）；`retry` 已在本票（T12）完成——`definition` 从 108 行收窄为契约
-19 行，实现并入 `provider`（147 行，含原有 `RetryPlugin`）。剩 3 个待拆：
-`validation`（0 / 240）、`tracing`（0 / 97）、`timeout`（0 / 40）——次数为 T1（`dfea59f`）以来该包被提交触碰
-的次数，行数为 `definition/__init__.py` 现行行数。
+19 行，实现并入 `provider`（147 行，含原有 `RetryPlugin`）；`validation` 已在本票（T12）
+消化——240 行（无稳定契约符号）整体并入 `provider`（290 行，含原有 `ValidationPlugin`），
+`definition/` 包撤销。剩 2 个待拆：`tracing`（0 / 97）、`timeout`（0 / 40）——次数为
+T1（`dfea59f`）以来该包被提交触碰的次数，行数为 `definition/__init__.py` 现行行数。

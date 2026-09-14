@@ -1,13 +1,13 @@
-"""包内测试：输出校验的实现与契约（`validation.definition`）逐字等价。
+"""包内测试：实现（`validation.provider`）直接调用与 ValidationPlugin 改写两条路径逐字等价。
 
-注入内容与 schema 不符都必须给出结构化失败，且错误消息与契约包抛出的完全一致；
+注入内容与 schema 不符都必须给出结构化失败，且错误消息与直接调用抛出的完全一致；
 合法输出则「装与不装校验插件，结果相同」。
 """
 from __future__ import annotations
 
 import pytest
 
-from capabilities.validation.definition import sanitize_output, validate_output
+from capabilities.validation.provider import sanitize_output, validate_output
 from capabilities.validation.provider import ValidationPlugin
 from miniharness.tools.contract import FAILED, ToolDefinition
 from miniharness.tools.runtime.test_pipeline import _pipeline

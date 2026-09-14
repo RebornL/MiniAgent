@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from capabilities.validation.definition import sanitize_output, sanitize_string
+from capabilities.validation.provider import sanitize_output, sanitize_string
 
 
 # ─── 1. 定义工具 ─────────────────────────────────
