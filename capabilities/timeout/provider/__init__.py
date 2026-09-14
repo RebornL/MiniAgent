@@ -4,7 +4,7 @@
 换成一层登记代理：工具体经 `ctx.get("process")` 起的每个受管范围都记在册上。超时到来时，它按
 受管范围契约终止整棵进程树（`terminate` 返回即范围已退出），等工具体跑到静止，然后返回结构化的
 `AbortOutcome(TIMED_OUT)`——与成功同构，不靠异常表达，由 `ToolRuntime` 规范化进同一条结果通道。
-默认超时沿用契约包 `capabilities.timeout.definition` 的 `DEFAULT_TOOL_TIMEOUT`；宽限期沿用受管
+默认超时沿用本包的 `DEFAULT_TOOL_TIMEOUT`；宽限期沿用受管
 范围契约的 `DEFAULT_GRACE_MS`。
 
 **终止手段随平台，宽限档不是普适承诺**：POSIX 后端先 `SIGTERM` 全组、宽限期满仍不退再
@@ -31,12 +31,12 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from capabilities.timeout.definition import DEFAULT_TOOL_TIMEOUT
 from miniharness.core import Context, Plugin
 from miniharness.llm.contract import LLM
 from miniharness.process.contract import (
@@ -48,6 +48,42 @@ from miniharness.process.contract import (
 from miniharness.tools.contract import CANCELLED, TIMED_OUT, AbortOutcome
 
 __all__ = ["ToolTimeoutPlugin", "TurnCancelPlugin"]
+
+
+DEFAULT_TOOL_TIMEOUT = 30  # 秒
+
+
+def call_with_timeout(
+    func: Callable,
+    args: tuple = (),
+    kwargs: dict | None = None,
+    timeout: float = DEFAULT_TOOL_TIMEOUT,
+) -> str:
+    """
+    在线程池中执行工具函数，超时则返回错误信息。
+
+    为什么用线程池而不是 asyncio:
+      - 工具函数是同步的（read_file, requests.get 等）
+      - 线程池对同步阻塞 IO 最自然
+      - 不要求用户改工具函数
+
+    返回:
+        正常: 工具函数的返回值（转 str）
+        超时: f"工具执行超时（{timeout}秒）"
+        异常: f"工具执行错误: {e}"
+    """
+    kwargs = kwargs or {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            result = future.result(timeout=timeout)
+            return str(result)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return f"工具执行超时（{timeout}秒），已取消执行"
+        except Exception as e:
+            return f"工具执行错误: {e}"
 
 
 @dataclass(frozen=True)

@@ -70,7 +70,7 @@ MiniAgent/
 │   ├── compaction/         #   definition/ + provider/
 │   ├── persistence/        #   definition/ + provider/
 │   ├── retry/              #   definition/ + provider/（+ test_retry.py）
-│   ├── timeout/            #   definition/ + provider/（+ test_timeout.py）
+│   ├── timeout/            #   provider/（无稳定契约符号，整体并入——T12）（+ test_timeout.py）
 │   ├── validation/         #   provider/（无稳定契约符号，整体并入——T12）
 │   ├── tracing/            #   provider/（无稳定契约符号，整体并入——T12）
 │   ├── skills/             #   definition/ + provider/（+ test_skills.py）+ consumer/
