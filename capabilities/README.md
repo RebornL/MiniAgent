@@ -7,13 +7,15 @@
 - **Consumer（消费方）**：只经契约消费该能力的包。
 
 契约与实现不同包，是为了让高频变动的策略不牵连稳定接口。若某条能力的契约**就是骨架上的
-事件 seam**（例如权限决策、终结收尾协议），契约留在 `miniharness/`，本族只放实现——
-不为了凑角色而建空壳包。
+事件 seam**（例如权限决策、终结收尾协议），契约留在 `miniharness/`，本族只放实现；若某条
+能力**没有稳定契约符号**（如 `validation` / `tracing` / `timeout`：无事件词汇、无形状、
+无投影，消费方要么缺位要么鸭子类型），则不设 `definition/`，语义写进能力的 `__init__.py`
+——同样不为了凑角色而建空壳包。
 
-**已知偏差**：本轮的 `definition/` 由 legacy 语义模块整体搬移而来，**同时含类型与实现**，
-所以上面这条「按变化速率分离」目前只是层级分离、不是内容分离，调阈值 / 改提示词 / 换存储
-仍要动 `definition/`。为什么先这样、以及真正的二分为何是独立工作，见
-[`docs/packaging.md`](../docs/packaging.md) §9「已知偏差」。
+T1 曾把这条规则只做到一半（legacy 语义模块整体搬进 `definition/`，类型与实现没分家）。
+该偏差已于 T12（issue #14）全部消化：`persistence` / `compaction` / `skills` / `retry`
+拆成契约 + 实现两包，`validation` / `tracing` / `timeout` 整体并入 provider 撤销空壳；
+消化路径与行数见 [`docs/packaging.md`](../docs/packaging.md) §9。
 
 本文件是该族的**权威包地图**。落位、命名、依赖方向与测试放置的规范见
 [`docs/packaging.md`](../docs/packaging.md)。
@@ -38,9 +40,8 @@
 
 ## 本族的测试
 
-包内测试与实现同层、独立文件：`capabilities/<能力>/definition/test_*.py` 与
-`capabilities/<能力>/provider/test_*.py`。它们只装「实现 + 一个工具流水线」，
-并逐字对照契约包的语义（例如
+包内测试与实现同层、独立文件：`capabilities/<能力>/provider/test_*.py`。它们只装
+「实现 + 一个工具流水线」，并逐字对照契约语义（例如
 `capabilities/retry/provider/test_retry.py` 同时跑 `with_retry` 与 `RetryPlugin`；
 `capabilities/persistence/provider/test_log_format.py` 逐字读回日志文件与迁移链）。
 跨包集成（装配整个 Loop）集中在 [`tests/`](../tests/README.md)。

@@ -4,7 +4,7 @@
 
 | 放哪 | 是什么 | 在哪 |
 | --- | --- | --- |
-| **包内测试** | 只依赖本包（或更下层）就能成立的断言 | 与实现同一个包、独立文件：`miniharness/session/test_projection.py`、`miniharness/tools/runtime/test_pipeline.py`、`capabilities/*/{definition,provider}/test_*.py` |
+| **包内测试** | 只依赖本包（或更下层）就能成立的断言 | 与实现同一个包、独立文件：`miniharness/session/test_projection.py`、`miniharness/tools/runtime/test_pipeline.py`、`capabilities/*/provider/test_*.py` |
 | **跨包集成** | 装配多个包之后才成立的断言（驱动 `Loop.turn`、装配整个 app） | 本目录：`tests/test_turn.py`、`tests/test_capabilities.py`、`tests/test_app.py` |
 
 本文件是该族的**权威包地图**。规范见 [`docs/packaging.md`](../docs/packaging.md)。

@@ -1,6 +1,6 @@
 # MiniAgent
 
-一个轻量级 Python Agent 框架：可插拔的 harness 骨架（miniharness）+ 工具调用、Skill 系统、会话持久化、上下文压缩、执行追踪。
+一个轻量级 Python Agent 框架：可插拔的 harness 骨架（miniharness）+ 工具调用、Skill 系统、会话持久化、上下文压缩、执行追踪、命令沙箱与审批、进程级终止与取消。
 
 **改策略不改循环**：重试、超时、压缩、输出校验、终结、持久化、追踪都是挂在事件 seam 上的插件，循环体里没有任何策略分支。架构与扩展方式见 [`docs/miniharness.md`](docs/miniharness.md)。
 
@@ -85,7 +85,7 @@ MiniAgent/
 │   ├── README.md           #   本族包地图
 │   ├── config.py           #   config.json 的惰性读取
 │   ├── tools.py            #   应用侧工具定义与技能描述
-│   ├── assembly.py         #   build_harness() / resume_session()
+│   ├── assembly.py         #   build_harness() / open_harness() / resume_session()
 │   ├── cli.py              #   chat_loop()
 │   ├── skeleton_demo.py    #   骨架 smoke run
 │   ├── stack_demo.py       #   全栈 smoke run
@@ -94,13 +94,23 @@ MiniAgent/
 ├── tests/                  # 测试族：跨包集成集中一处
 │   ├── README.md           #   测试放置说明
 │   ├── support.py          #   集成测试共享 helper
+│   ├── fixtures/legacy-v0-session/  #  v0 落盘形态样本（合成内容）
 │   ├── test_turn.py        #   S2：turn 边界
 │   ├── test_capabilities.py #  能力协作与契约等价
-│   └── test_app.py         #   app 装配
+│   ├── test_app.py         #   app 装配与旧会话迁移
+│   ├── test_shell.py       #   run_command（真实子进程）
+│   ├── test_sandbox.py     #   沙箱 seam
+│   ├── test_timeout.py     #   超时/取消 → 进程终止
+│   ├── test_cli_approval.py #  CLI 审批者
+│   └── test_cli_cancel.py  #   取消源
+├── CONTEXT.md              # 词表：投影 / 受管范围 / 中止结局 等术语
 ├── docs/
 │   ├── packaging.md        # 落位 / 命名 / 依赖方向 / 测试放置规范
 │   ├── miniharness.md      # 骨架架构与扩展方式
-│   └── review-guide-v1.md  # v1 迁移总结（记录的是 v1 平铺布局）
+│   ├── adr/                # 架构决策记录（0001：事件日志是唯一权威源）
+│   ├── agents/             # agent 工作方式（issue tracker / triage 标签 / domain 文档）
+│   ├── review-guide-v1.md  # v1 迁移总结（历史快照，记录 v1 平铺布局）
+│   └── review-guide-v2.md  # v2 总结、审视路径与未闭合台账
 ├── requirements.txt
 └── config.json             # 配置文件（需自行创建）
 ```
@@ -111,7 +121,7 @@ MiniAgent/
 python -m pytest -q
 ```
 
-测试集中在三个 seam 上：`Loop.turn`（集成）、`ToolRuntime.run`（工具管线契约）、`Session.derive_messages`（纯函数投影）。详见 [`docs/miniharness.md`](docs/miniharness.md) §6。
+测试集中在四类 seam 上：`Loop.turn`（集成）、`ToolRuntime.run`（工具管线契约）、`Session.derive_messages`（纯函数投影）、**进程边界**（真实子进程 + 系统侧进程确认）。详见 [`docs/miniharness.md`](docs/miniharness.md) §6。
 
 测试与实现同层但分离：包内测试与实现放同一个包（`miniharness/session/test_projection.py`、`capabilities/*/provider/test_*.py`），跨包集成集中在 [`tests/`](tests/README.md)。放置规范见 [`docs/packaging.md`](docs/packaging.md) §6。
 
