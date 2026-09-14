@@ -19,14 +19,7 @@ legacy 注记（原 `capabilities.skills.definition` 模块文件头，逐字并
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import time
-from dataclasses import field, asdict
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable
-
-import tiktoken
+from typing import Any, Callable, Iterable
 
 from capabilities.skills.definition import (
     LOADED_EVENT,
@@ -39,8 +32,6 @@ from miniharness.session import Session
 from miniharness.tools.contract import ToolDefinition
 from miniharness.tools.runtime import ToolRuntime
 
-if TYPE_CHECKING:
-    from openai import OpenAI
 
 __all__ = ["SkillManager", "SkillRegistry"]
 
