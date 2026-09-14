@@ -125,9 +125,9 @@ python -m pytest -q providers/process/test_managed_range.py -rs
 
 ## 5. 未闭合的地方（如实记下，不当作已完成）
 
-1. **§9 已知偏差收口中（[\#14](https://github.com/RebornL/MiniAgent/issues/14)）**：T1 整体搬移的旧 `definition/` 包正按 churn+体量逐个拆开——`persistence`（492 行）、`compaction`（214 行）、`skills`（143 行）已拆成**内容分离**（切片 1/2/3），剩 4 个仍是中间态（实现住在被当作契约的包里）：`validation` 240、`retry` 108、`tracing` 97、`timeout` 40。而包化规则之后新生的能力（如 `shell/definition`，59 行）定义得干净——这本身就是「规则有效、旧包欠拆」的对照。另：切片 3 顺带确认 `skills/provider` 里 8 个 legacy 死 import（HEAD 既有），待非搬移切片统一清理。
+1. **§9 已知偏差收口中（[\#14](https://github.com/RebornL/MiniAgent/issues/14)）**：T1 整体搬移的旧 `definition/` 包正按 churn+体量逐个拆开——`persistence`（492 行）、`compaction`（214 行）、`skills`（143 行）、`retry`（108 行）已拆成**内容分离**（切片 1/2/3/4），剩 3 个仍是中间态（实现住在被当作契约的包里）：`validation` 240、`tracing` 97、`timeout` 40。而包化规则之后新生的能力（如 `shell/definition`，59 行）定义得干净——这本身就是「规则有效、旧包欠拆」的对照。另：切片 3 顺带确认 `skills/provider` 里 8 个 legacy 死 import（HEAD 既有），待非搬移切片统一清理。
    实测依据（开票理由）：T2 / T3 / T4 三次改存储内部（水位、尾行判定、写后缓冲）**每次都不得不动 `capabilities/persistence/definition/`**，正是 `docs/packaging.md` §1 第 3 条要避免的情形。
-   进度与剩余排序见 `docs/packaging.md` §9.3。规格 #2 的 user story 18「包按变化速率拆分」在已拆的包上成立为内容分离，其余 4 包仍是层级分离。
+   进度与剩余排序见 `docs/packaging.md` §9.3。规格 #2 的 user story 18「包按变化速率拆分」在已拆的包上成立为内容分离，其余 3 包仍是层级分离。
 2. **POSIX 分支在本机从未实跑**：`providers/process/test_managed_range.py` 里那条「宽限 → 强杀」升级用例带 `skipif(os.name == "nt")`，本机永远是 skip。它的失败注入只在逻辑上论证过（把强杀那步写坏会让 `terminate` 抛 `TerminationError` 而不是静默通过），**没有在 Linux 上跑过**。
 3. **审批者的死路**：CLI 里的审批者已装（#12），但 `assembly.resume_session` 与直接用 `build_harness` 的调用方**不装审批者** → 那些路径上 `run_command` 仍「使能而无用」（`ask` → 无裁决者 → 默认拒绝）。安全，但不可用。
 4. **`[y/N]` 批准框的残留**：取消落在 `tools/guard` 之后、而批准框已经显示时，框会留在屏上（既有行为，未改）；即使答 `y`，`tools/execute` 的入口复查也会把这次调用收成 `cancelled`（命令不跑、本轮以取消收场）。

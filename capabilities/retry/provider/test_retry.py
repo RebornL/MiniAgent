@@ -1,6 +1,5 @@
-"""包内测试：重试策略的实现与契约（`retry.definition`）逐字等价。
-
-同一个失败序列分别跑契约包与 `tools/execute` 上的 `RetryPlugin`，断言尝试次数一致：
+"""包内测试：同一失败序列分别跑 provider 的 `with_retry` 与 `tools/execute` 上的
+`RetryPlugin`，断言尝试次数一致：
 可重试的瞬时故障退避重试，不可重试的错误一次都不重试，重试耗尽用尽 max_retries + 1 次。
 另断言中止结局按**码**决策：`timed_out` / `failed` 重试，`denied` / `cancelled` 不重试。
 """
@@ -8,11 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from capabilities.retry.definition import (
-    is_retryable_outcome,
-    with_retry,
-)
-from capabilities.retry.provider import RetryPlugin
+from capabilities.retry.definition import is_retryable_outcome
+from capabilities.retry.provider import RetryPlugin, with_retry
 from miniharness.core import Plugin
 from miniharness.tools.contract import (
     CANCELLED,
