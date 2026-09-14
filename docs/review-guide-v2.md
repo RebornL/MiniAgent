@@ -126,8 +126,8 @@ python -m pytest -q providers/process/test_managed_range.py -rs
 ## 5. 未闭合的地方（如实记下，不当作已完成）
 
 1. **【已闭合，T12】§9 已知偏差全部消化**（[\#14](https://github.com/RebornL/MiniAgent/issues/14)）：7 个 legacy `definition/` 包——`persistence`（492→42+563）、`compaction`（214→27）、`skills`（143→51）、`retry`（108→19）拆成**契约 + 实现**两包；`validation`（240）、`tracing`（98）、`timeout`（41）经通读确认**无稳定契约符号**（消费方要么缺位要么鸭子类型），整体并入 provider 撤销空壳（照 permission / final_output 先例）。user story 18「包按变化速率拆分」在全部能力上成立；细则与行数见 `docs/packaging.md` §9。
-2. **skills/provider 的 8 个 legacy 死 import**（`os` / `shutil` / `time` / `Path` / `field` / `asdict` / `tiktoken` / `OpenAI`，HEAD 既有、T12 纪律下不清理）待非搬移切片统一删除。
-3. **POSIX 分支在本机从未实跑**：`providers/process/test_managed_range.py` 里那条「宽限 → 强杀」升级用例带 `skipif(os.name == "nt")`，本机永远是 skip。它的失败注入只在逻辑上论证过（把强杀那步写坏会让 `terminate` 抛 `TerminationError` 而不是静默通过），**没有在 Linux 上跑过**。
+2. **【已闭合，`062d7c1`】skills/provider 的 8 个 legacy 死 import**（`os` / `shutil` / `time` / `Path` / `field` / `asdict` / `tiktoken` / `OpenAI`）已删除——TYPE_CHECKING 守卫唯一使用者是 OpenAI，随之整块删；AST assert 555 与 128 passed, 1 skipped 均不变。
+3. **【已闭合】POSIX 分支已实跑**（WSL2 Ubuntu，Python 3.12.3）：`providers/process/test_managed_range.py` → **6 passed, 1 skipped**（唯一 skip 是 Windows 兜底 `test_the_range_dies_with_the_process_that_owns_it`，`skipif` 方向正确）；此前从未执行过的 `test_terminate_escalates_to_a_hard_kill_when_the_signal_is_ignored` **PASSED**——「宽限 → 强杀」升级档与「组长先退仍达后代」自此有真实 Linux 执行证据。
 4. **审批者的死路**：CLI 里的审批者已装（#12），但 `assembly.resume_session` 与直接用 `build_harness` 的调用方**不装审批者** → 那些路径上 `run_command` 仍「使能而无用」（`ask` → 无裁决者 → 默认拒绝）。安全，但不可用。
 5. **`[y/N]` 批准框的残留**：取消落在 `tools/guard` 之后、而批准框已经显示时，框会留在屏上（既有行为，未改）；即使答 `y`，`tools/execute` 的入口复查也会把这次调用收成 `cancelled`（命令不跑、本轮以取消收场）。
 6. **非 LIFO 的 disposer 调用**：`Context.provide` 的 disposer 现在会自摘且幂等，但**乱序**调用较早的 disposer（同一键上还有更晚的 `provide` 在栈上）时，后续 `dispose()` 会剩下更晚那次捕获的旧值（旧实现此时以键被移除收场）。仓库内所有调用都是 LIFO，该路径不可达。
