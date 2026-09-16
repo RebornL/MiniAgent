@@ -5,6 +5,6 @@
 - 实现：`provider`（`CompactionConfig` / `ContextManager`：阈值与 token 计数；
   `CompactionPlugin` 订阅 `agent/pre-step` 做切分与增量合并，把被遮蔽范围 + 替换内容 + 摘要
   写成一条 `context/compacted` 事件，摘要函数可注入，默认 `stub_summarizer`）；
-- 消费方：`miniharness.session`（把压缩事件投影成 surface 替换）与 `app.assembly`
-  （重放压缩事件恢复增量摘要链）。
+- 消费方：`miniharness.session`（把压缩事件投影成 surface 替换）；`app.assembly` 派发
+  `session/replayed`，`CompactionPlugin` 订阅后折叠增量摘要链。
 """

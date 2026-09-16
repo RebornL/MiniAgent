@@ -150,7 +150,8 @@ class SkillRegistry(Plugin):
         self._ctx = ctx
         self._tools: ToolRuntime = ctx.get("tools")
         self._session: Session = ctx.get("session")
-        ctx.provide("skills", self)
+        ctx.provide("skills", self)          # 消费方按名字取用（SystemPromptPlugin 同步提示、测试装载技能）
+        ctx.on("session/replayed", self._replay)   # 重放态折叠：激活集与工具注册由日志里的 skill/* 事件重建
         ctx.effect(self.unload_all)          # 插件卸载时撤销全部已装载技能（可逆注册）
         # meta 工具随插件卸载一并撤销。描述在这里留空、由 `_refresh_meta_tool_descriptions`
         # 填上当前可用 / 已加载的技能名——模型只看得见 meta 工具，这是技能的可发现性来源。
@@ -220,6 +221,10 @@ class SkillRegistry(Plugin):
         for name in active_skills(events):
             if name in self._skills:
                 self._apply_load(name)
+
+    def _replay(self, payload: dict) -> None:
+        """`session/replayed` 订阅口：转交 `restore` 折叠（公开口不变，包内单测直调）。"""
+        self.restore(payload["events"])
 
     # ── 应用/撤销（静默：不改日志，供重放与插件卸载使用；也是「是否真的动了」的唯一判据）──
     def _apply_load(self, name: str) -> Callable[[], None] | None:

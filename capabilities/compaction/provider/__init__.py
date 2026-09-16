@@ -134,12 +134,16 @@ class CompactionPlugin(Plugin):
 
     def apply(self, ctx: Context) -> None:
         self._session: Session = ctx.get("session")
-        ctx.provide("compaction", self)      # 装配层按名字取用它做重放（restore）
+        ctx.on("session/replayed", self._replay)   # 重放态折叠：摘要链只由日志里的压缩事件重建
         ctx.on("agent/pre-step", self._pre)
 
     def restore(self, events: Iterable[dict]) -> None:
         """从事件日志重放压缩状态：摘要链只由日志里的压缩事件重建，不读旁路元数据。"""
         self.context.restore(compaction_summaries(events))
+
+    def _replay(self, payload: dict) -> None:
+        """`session/replayed` 订阅口：转交 `restore` 折叠（公开口不变，包内单测直调）。"""
+        self.restore(payload["events"])
 
     def _pre(self, payload: dict, next_: Callable[[], Any]) -> dict:
         self.compact_if_needed()

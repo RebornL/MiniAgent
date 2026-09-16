@@ -5,6 +5,8 @@
 - `register_skills` 注册的技能可经 `load_skill` 装载，`final_output` 借此终结本轮；
 - `resume_session` 只靠重放事件日志恢复：模型可见历史、压缩摘要与技能状态都由日志重建，
   `meta.json` 里不再有 summary / active_skills 旁路（旧会话的那份旁路在迁移翻译期折进日志）；
+- `session/replayed` seam：`open_harness` 重放后派发一次，任何订阅者收到的都是装配层
+  载入的那份完整事件日志（「订阅 ⇒ 重放」不变量）；
 - 旧会话迁移：v0 落盘形态的 fixture 迁移后技能工具已注册、摘要链非空；
 - `meta.json` 不存模型可见内容，列表要展示的末条输入按需由日志重算；
 - 导入期不碰 config.json（全新 clone 上 `import app` 必须成功）。
@@ -20,9 +22,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from app.assembly import build_harness, resume_session
+from app import assembly
+from app.assembly import build_harness, open_harness, resume_session
 from capabilities.compaction.definition import compaction_summaries
 from capabilities.persistence.provider import META_FILE, PersistenceManager, Store
+from miniharness.core import Context, Plugin
 from miniharness.session import Session
 from providers.mock import MockLLM
 
@@ -41,6 +45,19 @@ def _meta(tmp_path: Path, session_id: str) -> dict:
 def _latest_tool_content(messages: list[dict]) -> dict:
     """把最后一次工具观察当作最终答复 —— 工具没执行成功时答复就会露馅。"""
     return {"text": messages[-1]["content"]}
+
+
+class _ReplaySpy(Plugin):
+    """测试插件：订阅 `session/replayed`，记录每次收到的重放事件日志。"""
+
+    def __init__(self) -> None:
+        self.received: list[list[dict]] = []
+
+    def apply(self, ctx: Context) -> None:
+        ctx.on("session/replayed", self._on_replayed)
+
+    def _on_replayed(self, payload: dict) -> None:
+        self.received.append(payload["events"])
 
 
 
@@ -263,6 +280,35 @@ def test_restart_replays_the_log_into_the_same_history_word_for_word(tmp_path):
     # 日志只增不改：重放出来的前缀就是中断前那份日志
     after = PersistenceManager(Store(str(tmp_path))).load_events("s1")
     assert after[:len(session.events)] == session.events
+
+
+def test_open_harness_notifies_session_replayed_subscribers_with_the_loaded_events(tmp_path, monkeypatch):
+    """不变量：订阅 `session/replayed` 的插件在 resume 时收到装配层重放的完整事件日志。
+
+    「谁的状态来自日志」不再是装配层的私有记忆：装配层只负责重放 + 派发一次，
+    任何订阅者（现存或将来的恢复策略）都拿到同一份事件日志自行折叠。
+    """
+    llm = MockLLM().then_text("收到")
+    _, _, loop = build_harness(model="mock", session_id="s1",
+                               store_dir=str(tmp_path), llm=llm)
+    loop.turn("北京天气如何")
+    events = PersistenceManager(Store(str(tmp_path))).load_events("s1")
+
+    spy = _ReplaySpy()
+    real_build = assembly.build_harness
+
+    def build_with_spy(**kwargs):
+        ctx, session, loop = real_build(**kwargs)
+        ctx.load(spy)                      # 测试插件挂在重放派发之前
+        return ctx, session, loop
+
+    monkeypatch.setattr(assembly, "build_harness", build_with_spy)
+
+    open_harness(PersistenceManager(Store(str(tmp_path))), "s1",
+                 model="mock", store_dir=str(tmp_path), client=None,
+                 base_system_prompt="", llm=MockLLM().then_text("继续"))
+
+    assert spy.received == [events]        # 恰好派发一次，恰为装配层载入的那份日志
 
 
 def test_import_works_on_a_fresh_clone_without_config_json(tmp_path):

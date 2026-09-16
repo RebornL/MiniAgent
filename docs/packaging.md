@@ -74,7 +74,7 @@ flowchart TB
   `miniharness.tools.contract` 不 import `miniharness.tools.runtime`。
 - **能力之间**：可以依赖对方的**契约**，不要依赖对方的实现。确有实现级协同时，
   由 `app/` 装配处接线（例如终结工具名由 `app.assembly` 注入 `FinalOutputPlugin`、
-  恢复时由它把同一份日志喂给 `CompactionPlugin.restore` / `SkillRegistry.restore`，
+  恢复时由它在重放后派发一次 `session/replayed`，持有日志派生状态的插件各自订阅折叠，
   而不是让持久化 provider 去 import 压缩与技能的实现）。
 - **tests** 可以依赖所有族；包内测试只依赖本包与更下层（跨层的断言属于 `tests/`）。
 

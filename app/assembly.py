@@ -182,9 +182,9 @@ def open_harness(
 ) -> tuple[Loop, Context]:
     """装配 harness 并从事件日志重放会话状态，把 `(loop, ctx)` 一并交给调用方。
 
-    重放是恢复的唯一来源：`Session.replay` 重建模型可见历史，
-    压缩摘要与技能状态分别由 `CompactionPlugin.restore` / `SkillRegistry.restore`
-    折叠同一份日志里的压缩事件与 `skill/*` 事件——不读任何旁路元数据。
+    重放是恢复的唯一来源：`Session.replay` 重建模型可见历史，随后派发一条
+    `session/replayed`（携带完整事件日志）——日志派生状态的折叠由该事件的订阅方完成，
+    不读任何旁路元数据。
 
     公开交出 ctx（`build_harness` 本就返回它），是让装配入口成为事件 seam 的**接线点**：
     CLI 的审批者装在 ctx 上，不必去够 `Loop` 的私有面（`Loop` 的公开面只有 `turn` / `apply`）。
@@ -195,8 +195,7 @@ def open_harness(
     events = pm.load_events(session_id)
     if events:
         session.replay(events)
-        ctx.get("compaction").restore(events)
-        ctx.get("skills").restore(events)
+        ctx.emit("session/replayed", {"events": events})
     return loop, ctx
 
 
