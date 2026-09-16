@@ -67,9 +67,9 @@ def test_approval_shows_full_argv_and_cwd_and_then_runs_the_tool(tmp_path, capsy
     session, loop, marker = _assembled(tmp_path, cli_approver(prompt=lambda _: "y",
                                                              interactive=lambda: True))
 
-    answer = loop.turn("跑一下")
+    outcome = loop.turn("跑一下")
 
-    assert answer == "完成"
+    assert outcome["text"] == "完成"
     assert json.loads(marker.read_text(encoding="utf-8")) == ARGV   # 放行 → 工具体执行，且执行的就是批准的那份 argv
     assert [e["status"] for e in _events(session, "tool/result")
             if e["name"] == APPROVAL_SCOPE] == [OK]
@@ -86,13 +86,14 @@ def test_a_rejected_command_never_runs(tmp_path):
     session, loop, marker = _assembled(tmp_path, cli_approver(prompt=lambda _: "",
                                                              interactive=lambda: True))
 
-    answer = loop.turn("跑一下")
+    outcome = loop.turn("跑一下")
 
     assert not marker.exists()                                  # 拒绝 → 工具体没跑
     assert not [e for e in _events(session, "tool/result") if e["name"] == APPROVAL_SCOPE]
     denied = _events(session, "tool/denied")
     assert len(denied) == 1 and denied[0]["name"] == APPROVAL_SCOPE
-    assert answer == denied[0]["reason"] and APPROVAL_SCOPE in answer
+    assert outcome["status"] == "denied"                        # 结局沿既有结果通道为 denied
+    assert outcome["text"] == denied[0]["reason"] and APPROVAL_SCOPE in outcome["text"]
 
 
 def test_non_tty_input_is_denied_without_asking_or_running(tmp_path):

@@ -69,7 +69,8 @@ def _demo() -> None:
         session.append("user/message", content=f"第{i}问：" + "很长的历史内容。" * 20)
         session.append("assistant/message", content=f"第{i}答：" + "很长的历史内容。" * 20)
 
-    print("turn ->", ctx.get("loop").turn("把 21 翻倍"))
+    outcome = ctx.get("loop").turn("把 21 翻倍")
+    print("turn ->", outcome["text"])
     print("log   ->", [(e["seq"], e["type"]) for e in session.events])
     print("compact->", [(e["shadowed_range"], e["summary"]) for e in session.events
                         if e["type"] == "context/compacted"],

@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from miniharness.core import Context, Plugin
-from miniharness.llm.contract import LLM
+from miniharness.loop import OUTCOME_CANCELLED
 from miniharness.process.contract import (
     DEFAULT_GRACE_MS,
     ManagedRange,
@@ -345,18 +345,21 @@ class TurnCancelPlugin(Plugin):
       （`PermissionPlugin`）对 `run_command` 直接给出 `ask` 而不调 `next_`，挂在那里的守卫会被
       它短路、永不被调用——审批照样弹、命令照样跑。guard 在 pre-execute 决策**之后**、审批
       **之前**运行，且监听器**不参与瀑布短路**；`deny` 比 `ask` 更严，单调收紧的语义不变。
-    - `agent/post-tool`：本次调用的权威结果是 `cancelled` → 本轮就此收尾、不再采样。
-    - `llm` seam：取消之后模型若只回文本，那条文本换成取消说明（见 `_CancelledTurnReply`）。
-      重试重入 `tools/execute` 那条路不走这里，由 `ToolTimeoutPlugin._wrap` 的入口复查收住。
+    - `agent/post-tool`：本次调用的权威结果是 `cancelled` → 以 `cancelled` 结局就此收尾、
+      不再采样。
+    - `agent/turn-stopping`：本轮已取消后的 `Loop` 自主收尾（取消后的纯文本答复、工具全被拒、
+      步数用尽）一律改判为取消——以取消说明与 `cancelled` 结局收场，模型可见历史（日志里的
+      `assistant/message`）、`turn/end` 与用户看到的答复都写着这是一次取消。重试重入
+      `tools/execute` 那条路不走这里，由 `ToolTimeoutPlugin._wrap` 的入口复查收住。
     """
 
-    inject = ("tools", "abort", "llm")
+    inject = ("tools", "abort")
 
     def apply(self, ctx: Context) -> None:
         self._abort: ToolTimeoutPlugin = ctx.get("abort")
         ctx.on("tools/guard", self._refuse_new_calls)
         ctx.on("agent/post-tool", self._end_turn_on_cancelled_result)
-        ctx.provide("llm", _CancelledTurnReply(ctx.get("llm"), self._abort))
+        ctx.on("agent/turn-stopping", self._end_bare_text_reply)
 
     def _refuse_new_calls(self, payload: dict, decision: dict) -> dict | None:
         """本轮已取消：工具体不启动（没有新进程，也就不会有新的孤儿）。
@@ -374,29 +377,13 @@ class TurnCancelPlugin(Plugin):
         decision = next_()
         result = payload["result"]
         if decision.get("continue", True) and result.get("status") == CANCELLED:
-            return {"continue": False, "answer": _turn_cancelled(result.get("content", ""))}
+            return {"continue": False, "status": OUTCOME_CANCELLED,
+                    "answer": _turn_cancelled(result.get("content", ""))}
         return decision
 
-
-class _CancelledTurnReply(LLM):
-    """`llm` seam 的代理：本轮已取消时，模型只回的文本换成取消说明。
-
-    取消可能落在**采样期间**（人看着模型往外吐字，按下 Ctrl-C）。那一刻本轮还没有任何工具结果，
-    `agent/post-tool` 这条收尾 seam 不会被派发，而 `Loop` 收到纯文本就自己写 `turn/end=done`
-    并把它当答案返回——取消会被静默丢弃。装在 llm seam 上，是因为它是**模型回复之后、回合收尾
-    之前**唯一的接线口：拿到回复的同一刻按取消状态改写，不必给 `Loop` 加一条收尾 seam。
-
-    只改写「没有工具调用的回复」：带工具调用的回复照常交给 `Loop`——每个调用都由 guard 逐条
-    拒绝并落配对事件，本轮以 `denied` 收场，模型可见历史与日志始终一致。
-    """
-
-    def __init__(self, inner: LLM, abort: ToolTimeoutPlugin) -> None:
-        self._inner = inner
-        self._abort = abort
-
-    def complete(self, messages: list[dict]) -> dict:
-        reply = self._inner.complete(messages)
+    def _end_bare_text_reply(self, payload: dict, next_: Callable[[], Any]) -> dict:
+        """本轮已取消：`Loop` 的自主收尾一律改判为取消（以取消说明收场）。"""
         reason = self._abort.turn_cancel_reason
-        if reason is not None and not reply.get("tool_calls"):
-            return {"text": _turn_cancelled(reason)}
-        return reply
+        if reason is None:
+            return next_()
+        return {"continue": False, "status": OUTCOME_CANCELLED, "text": _turn_cancelled(reason)}

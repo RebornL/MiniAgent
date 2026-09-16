@@ -59,9 +59,9 @@ def test_build_harness_keeps_tools_lazy_until_the_skill_is_loaded(tmp_path):
     assert all(runtime.get(name) is None
                for name in ("calculate", "search_web", "read_file", "write_file"))
 
-    answer = loop.turn("6 * 7 是多少")
+    outcome = loop.turn("6 * 7 是多少")
 
-    assert answer == "6 * 7 = 42"
+    assert outcome["text"] == "6 * 7 = 42"
     assert runtime.get("calculate") is not None            # 技能装载后工具才可见
     assert [event["name"] for event in session.events
             if event["type"] == "tool/result"] == ["load_skill", "calculate"]
@@ -81,9 +81,9 @@ def test_build_harness_loaded_skill_provides_the_terminal_tool(tmp_path):
     _, _, loop = build_harness(model="mock", session_id="s2",
                                store_dir=str(tmp_path), llm=llm)
 
-    answer = loop.turn("查北京天气并结构化输出")
+    outcome = loop.turn("查北京天气并结构化输出")
 
-    assert json.loads(answer) == {"result": {"city": "北京"}, "summary": "北京"}
+    assert json.loads(outcome["text"]) == {"result": {"city": "北京"}, "summary": "北京"}
     assert len(llm.calls) == 2                       # 终结工具后不再采样
 
 

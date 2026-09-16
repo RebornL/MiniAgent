@@ -91,9 +91,10 @@ def test_final_output_plugin_ends_turn_at_terminal_tool():
                               lambda args: json.dumps(args, ensure_ascii=False))],
     )
 
-    answer = loop.turn("输出结构化答案")
+    outcome = loop.turn("输出结构化答案")
 
-    assert json.loads(answer) == {"result": {"answer": 42}, "summary": "42"}
+    assert outcome["status"] == "terminal"                 # 终结工具以 terminal 结局收尾
+    assert json.loads(outcome["text"]) == {"result": {"answer": 42}, "summary": "42"}
     assert len(llm.calls) == 1                             # 终结后不再采样
     assert _event_types(session)[-2:] == ["tool/result", "turn/end"]
 
@@ -105,5 +106,5 @@ def test_final_output_plugin_ends_turn_at_terminal_tool():
         tools=[ToolDefinition("calculate", "算数", CALC_PARAMS, lambda args: "2")],
     )
 
-    assert loop2.turn("算 1+1") == "1 + 1 = 2"
+    assert loop2.turn("算 1+1") == {"status": "done", "text": "1 + 1 = 2"}
     assert len(llm2.calls) == 2

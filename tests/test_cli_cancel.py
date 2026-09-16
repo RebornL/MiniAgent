@@ -156,7 +156,9 @@ def test_an_interrupt_during_a_running_command_cancels_the_turn_and_kills_the_tr
     assert "被取消" in results[0]["content"] and "测试注入的中断" in results[0]["content"]
     # 取消即收尾：第一轮只采样两次（装载技能 → 长命令），没有「取消之后还去问模型」的第三次
     assert len(llm.calls) == 4, "第一轮 2 次（装载、长命令）；第二轮 2 次（命令、答复）"
-    assert [e["status"] for e in ctx.get("session").events if e["type"] == "turn/end"] == ["done", "done"]
+    # 日志里认得出取消：turn/end 的结局码就是契约——第一轮 cancelled，第二轮 done
+    assert [e["status"] for e in ctx.get("session").events if e["type"] == "turn/end"] == [
+        "cancelled", "done"]
     assert "⏹️ 已取消本轮" in capsys.readouterr().out
 
     # 系统侧独立确认：组长与后代都不再存在（不采信被测实现自己的返回值）
@@ -207,8 +209,9 @@ def test_an_interrupt_with_nothing_running_cancels_the_turn_without_exiting(
     assert not [e for e in events if e["type"] == "skill/loaded"], "新的工具调用没有执行"
     assert [e["reason"] for e in events if e["type"] == "tool/denied"] == [
         f"回合已取消（采样期间的中断）：工具未执行"]
-    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["denied", "done"]
-    assert "回合已取消" in capsys.readouterr().out
+    # 取消后的全被拒同样过 `agent/turn-stopping` 收尾 seam：第一轮改判为 cancelled
+    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["cancelled", "done"]
+    assert "已取消本轮" in capsys.readouterr().out
 
 
 # ═══════════════ 边界态：中断在工具收尾之后到达 ═══════════════
@@ -238,7 +241,8 @@ def test_a_late_interrupt_after_the_tool_finished_does_not_rewrite_the_result(
     assert landed == [False]                       # 没有在跑的调用：no-op
     assert [r["status"] for r in _command_results(ctx)] == [OK]   # 做成的结果不被改写
     events = ctx.get("session").events
-    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["done"]
+    # 迟到的取消粘到本轮：纯文本回复被 turn-stopping 收尾 seam 拦下，结局码是 cancelled
+    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["cancelled"]
     shown = capsys.readouterr().out
     assert "⏹️ 已取消本轮：迟到中断" in shown       # 本轮不是一次「什么都没发生」的正常收尾
     assert "跑完了" not in shown                    # 取消之后模型回的文本被换成取消说明
@@ -273,12 +277,15 @@ def test_two_interrupts_in_one_turn_are_idempotent(tmp_path):
 
     watcher = _Watcher(interrupt_when_running)
     with interrupts.armed(ctx):
-        answer = loop.turn("跑一个长命令")
+        outcome = loop.turn("跑一个长命令")
     watcher.join()
 
     assert first == [True] and second == [True]    # 两次都落到了在跑的工具调用上
     assert [r["status"] for r in _results(ctx)] == [CANCELLED]   # 只终止一次、只有一个结局
-    assert answer.startswith("⏹️ 已取消本轮")
+    assert [e["status"] for e in ctx.get("session").events if e["type"] == "turn/end"] == [
+        "cancelled"]
+    assert outcome["status"] == "cancelled"
+    assert outcome["text"].startswith("⏹️ 已取消本轮")
     assert len(llm.calls) == 1
     _assert_gone(*spawned)
 
@@ -381,7 +388,7 @@ def test_a_cancelled_turn_refuses_an_approval_gated_tool_before_the_prompt(tmp_p
     ctx.load(loop)
 
     with interrupts.armed(ctx):
-        answer = loop.turn("跑一条命令")
+        outcome = loop.turn("跑一条命令")
 
     events = ctx.get("session").events
     assert landed == [False], "没有在跑的命令：取消请求无处可落"
@@ -389,8 +396,11 @@ def test_a_cancelled_turn_refuses_an_approval_gated_tool_before_the_prompt(tmp_p
     assert not marker.exists(), "工具体没有执行：标记文件不该出现"
     assert [e["reason"] for e in events if e["type"] == "tool/denied"] == [
         "回合已取消（采样期间的中断）：工具未执行"]
-    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["denied"]
-    assert answer == "回合已取消（采样期间的中断）：工具未执行"
+    # 取消后的全被拒同样过 `agent/turn-stopping` 收尾 seam：结局改判为 cancelled——
+    # 审计日志里一次被取消的回合不再与「策略拒绝」不可区分
+    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["cancelled"]
+    assert outcome == {"status": "cancelled",
+                       "text": "⏹️ 已取消本轮：采样期间的中断"}
     assert len(llm.calls) == 1, "取消即收尾：没有再去问模型"
 
 
@@ -441,14 +451,17 @@ def test_a_cancel_during_retry_backoff_starts_no_new_process(capsys):
 
     watcher = _Watcher(interrupt_during_backoff)
     with interrupts.armed(ctx):
-        answer = loop.turn("起一个会失败的进程型工具")
+        outcome = loop.turn("起一个会失败的进程型工具")
     watcher.join()
 
     assert len(seam.spawns) == 1, "取消之后不得再起进程树"
     assert seam.spawns == finished
     assert [r["status"] for r in _results(ctx)] == [CANCELLED]
     assert "退避期间的中断" in _results(ctx)[0]["content"]
-    assert answer.startswith("⏹️ 已取消本轮")
+    assert [e["status"] for e in ctx.get("session").events if e["type"] == "turn/end"] == [
+        "cancelled"]
+    assert outcome["status"] == "cancelled"
+    assert outcome["text"].startswith("⏹️ 已取消本轮")
     assert "次重试" in capsys.readouterr().out, "退避确实发生过：第 2 次尝试是被入口复查收住的"
     _assert_gone(*finished)
 
@@ -457,9 +470,10 @@ def test_a_cancel_after_sampling_does_not_let_plain_text_pass_as_the_turn_answer
         monkeypatch, tmp_path, capsys):
     """取消之后模型只回文本：那条文本不得当成本轮答复——本轮以取消说明收场。
 
-    这条路径没有工具结果，`agent/post-tool` 的收尾不会被派发，`Loop` 收到纯文本就自己写
-    `turn/end=done` 并把它当答案返回。取消因此必须粘到**本轮**：模型可见历史（日志里的
-    `assistant/message`）与用户看到的答复都写着这是一次取消。
+    这条路径没有工具结果，`agent/post-tool` 的收尾不会被派发；`agent/turn-stopping` 在回合
+    收尾之前派发，`TurnCancelPlugin` 在那里接住：纯文本不当作本轮答复，本轮以取消说明与
+    `cancelled` 结局收场——模型可见历史（日志里的 `assistant/message`）、`turn/end` 与用户
+    看到的答复都写着这是一次取消。
     """
     interrupts = InterruptSource()
     landed: list[bool] = []
@@ -475,7 +489,7 @@ def test_a_cancel_after_sampling_does_not_let_plain_text_pass_as_the_turn_answer
     events = ctx.get("session").events
     assert [e["content"] for e in events if e["type"] == "assistant/message"] == [
         "⏹️ 已取消本轮：采样期间的中断"], "模型可见历史要能分辨这轮是被人取消的"
-    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["done"]
+    assert [e["status"] for e in events if e["type"] == "turn/end"] == ["cancelled"]
     shown = capsys.readouterr().out
     assert "⏹️ 已取消本轮：采样期间的中断" in shown
     assert "不该当成本轮答复" not in shown

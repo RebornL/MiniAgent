@@ -58,8 +58,8 @@ def _demo() -> None:
 
     session: Session = ctx.get("session")
     print("🧠 ", end="", flush=True)
-    answer = loop.turn("用 calculate 算出 156*23，再用 final_output 输出结果")
-    print(f"\nturn -> {answer}")
+    outcome = loop.turn("用 calculate 算出 156*23，再用 final_output 输出结果")
+    print(f"\nturn -> {outcome['text']}")
     print("log  ->", [(e["seq"], e["type"]) for e in session.events])
 
 

@@ -217,4 +217,4 @@ def resume_session(
     loop, _ = open_harness(pm, session_id, model=model, store_dir=store_dir,
                            client=client, llm=llm,
                            base_system_prompt=base_system_prompt)
-    return loop.turn(new_input)
+    return loop.turn(new_input)["text"]

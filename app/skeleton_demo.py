@@ -41,13 +41,13 @@ def _demo() -> None:
 
     session: Session = ctx.get("session")
     print("tools.specs:", [s["function"]["name"] for s in tools.specs()])
-    print("turn ->", loop.turn("16 * 2 是多少"))
+    print("turn ->", loop.turn("16 * 2 是多少")["text"])
     print("log   ->", [(e["seq"], e["type"]) for e in session.events])
 
     llm2 = ctx.get("llm")
     llm2.script = [{"text": "", "tool_calls": [{"id": "c9", "name": "write_file",
                                                 "args": {"path": "x", "content": "y"}}]}]
-    print("turn ->", loop.turn("写个文件"))
+    print("turn ->", loop.turn("写个文件")["text"])
 
 
 if __name__ == "__main__":

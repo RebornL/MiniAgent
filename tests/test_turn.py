@@ -2,13 +2,15 @@
 
 装配完整的 harness（Session + 工具 + provider + 策略插件）驱动 `Loop.turn`，
 断言工具执行与落日志、deny 的配对完整性、终结工具收尾，以及
-「只换插件就改变结局，而 Loop 零改动」。
+「只换插件就改变结局，而 Loop 零改动」。turn 返回结构化结局 `{status, text}`
+（`turn/end` 记录同一个 status），断言一律落在结局码与 `text` 上。
 """
 from __future__ import annotations
 
 import json
 import os
 import time
+from typing import Callable
 
 import pytest
 
@@ -44,9 +46,9 @@ def test_turn_feeds_persistence_and_trace_consumers(tmp_path):
                               lambda args: args["n"] * 2)],
     )
 
-    answer = loop.turn("把 21 翻倍")
+    outcome = loop.turn("把 21 翻倍")
 
-    assert answer == "42"
+    assert outcome == {"status": "done", "text": "42"}
     # 持久化：磁盘上就是日志本身（同一个真相源），模型可见内容由它重放重建
     assert persistence.saves > 0
     stored = PersistenceManager(Store(str(tmp_path))).load_events("s1")
@@ -67,7 +69,7 @@ def test_turn_leaves_a_readable_event_log_with_monotonic_seq(tmp_path):
         PersistenceManager(Store(str(tmp_path))), session_id="s1")
     _, session, loop, _ = _assemble(MockLLM().then_text("在的"), plugins=[persistence])
 
-    assert loop.turn("在吗") == "在的"
+    assert loop.turn("在吗") == {"status": "done", "text": "在的"}
 
     header, *lines = Store(str(tmp_path)).log_path("s1") \
         .read_text(encoding="utf-8").splitlines()
@@ -96,9 +98,9 @@ def test_turn_executes_tool_and_logs_result_then_answers():
     _, session, loop, _ = _assemble(
         llm, tools=[ToolDefinition("calculate", "算数", CALC_PARAMS, calculate)])
 
-    answer = loop.turn("16 * 2 是多少")
+    outcome = loop.turn("16 * 2 是多少")
 
-    assert answer == "16 * 2 = 32"
+    assert outcome == {"status": "done", "text": "16 * 2 = 32"}
     assert calls == [{"expression": "16 * 2"}]          # 工具体被执行
     assert _event_types(session) == [                    # tool/result 按序入日志
         "turn/start", "user/message", "assistant/message",
@@ -122,15 +124,16 @@ def test_permission_plugin_denies_and_tool_result_is_not_logged():
                               lambda a: ran.append(a) or "written")],
     )
 
-    answer = loop.turn("把 y 写进 x.txt")
+    outcome = loop.turn("把 y 写进 x.txt")
 
-    assert "write_file" in answer                        # turn 返回拒绝
+    assert outcome["status"] == "denied"                 # 本轮以「被拒」结局收场
+    assert "write_file" in outcome["text"]               # 理由点名了被拒的工具
     assert ran == []                                     # 工具体未执行
     assert "tool/result" not in _event_types(session)     # 权威结果未入日志
     assert len(llm.calls) == 1                           # 被拒后不再采样
     # 被拒的调用没有权威结果，但模型可见历史里 tool_calls 仍然配对完整
     assert session.derive_messages()[-1] == {
-        "role": "tool", "content": answer, "tool_call_id": "call_1"}
+        "role": "tool", "content": outcome["text"], "tool_call_id": "call_1"}
 
 
 def test_turn_finishes_the_whole_batch_before_a_terminal_tool_ends_it():
@@ -156,9 +159,11 @@ def test_turn_finishes_the_whole_batch_before_a_terminal_tool_ends_it():
                ToolDefinition("final_output", "终结", {}, final_output)],
     )
 
-    answer = loop.turn("算 16*2 并输出")
+    outcome = loop.turn("算 16*2 并输出")
 
-    assert answer == final_output({"result": {"n": 32}})   # 终结工具的 content 即本轮答复
+    assert outcome == {"status": "terminal",
+                       "text": final_output({"result": {"n": 32}})}   # 终结工具的 content 即本轮答复
+    assert [e["status"] for e in session.events if e["type"] == "turn/end"] == ["terminal"]
     assert ran == [{"expression": "16 * 2"}]               # 排在终结工具之后的普通工具也没被丢弃
     results = [e for e in session.events if e["type"] == "tool/result"]
     assert sorted(e["call_id"] for e in results) == ["c1", "c2"]   # 同批 tool_calls 全部配对
@@ -184,9 +189,10 @@ def test_turn_pairing_survives_a_denial_earlier_in_the_same_batch():
                               lambda a: ran.append(a) or "2")],
     )
 
-    answer = loop.turn("写文件再算 1+1")
+    outcome = loop.turn("写文件再算 1+1")
 
-    assert "write_file" in answer                          # 本轮以首个拒绝原因收尾
+    assert outcome["status"] == "denied"                   # 本轮以首个拒绝原因收尾
+    assert "write_file" in outcome["text"]                 # 理由点名了被拒的工具
     assert ran == [{"expression": "1 + 1"}]                # 被拒的工具体没执行，后面的执行了
     assert [(e["type"], e["call_id"]) for e in session.events
             if e["type"] in ("tool/result", "tool/denied")] == [
@@ -203,7 +209,7 @@ def test_policy_plugin_changes_turn_outcome_without_changing_loop():
         time.sleep(0.3)
         return "慢工具完成"
 
-    def run_turn(plugins) -> tuple[str, list[dict]]:
+    def run_turn(plugins) -> tuple[dict, list[dict]]:
         llm = MockLLM().then_tool_call("slow", {})
         # 让 provider 把最后一次模型可见内容当作最终答复 → 结局可观察
         llm.script.append(lambda messages: {"text": f"最终观察: {messages[-1]['content']}"})
@@ -212,10 +218,10 @@ def test_policy_plugin_changes_turn_outcome_without_changing_loop():
         assert isinstance(loop, Loop)                     # 两次跑的是同一个 Loop 实现
         return loop.turn("调一下慢工具"), session.events
 
-    plain_answer, plain_log = run_turn([])
-    timed_answer, timed_log = run_turn([ToolTimeoutPlugin(default_ms=50)])
+    plain_outcome, plain_log = run_turn([])
+    timed_outcome, timed_log = run_turn([ToolTimeoutPlugin(default_ms=50)])
 
-    assert plain_answer == "最终观察: 慢工具完成"
+    assert plain_outcome == {"status": "done", "text": "最终观察: 慢工具完成"}
     (plain_result,) = [e for e in plain_log if e["type"] == "tool/result"]
     (timed_result,) = [e for e in timed_log if e["type"] == "tool/result"]
     # 超时必须与成功可区分：权威结果带稳定的 `timed_out` 码，而不是把超时伪装成 ok 的字符串，
@@ -223,7 +229,99 @@ def test_policy_plugin_changes_turn_outcome_without_changing_loop():
     assert plain_result["status"] == "ok"
     assert timed_result["status"] == "timed_out"
     assert "超时" in timed_result["content"]
-    assert timed_answer != plain_answer
+    assert timed_outcome != plain_outcome
+
+
+# ═══════════════ S2 主 seam（集成）：turn-stopping 收尾 seam ═══════════════
+def test_turn_stopping_subscriber_can_rewrite_the_reply_text():
+    """`agent/turn-stopping` 是活的收尾 seam：直接订阅即可在放行之上改写纯文本答复。"""
+    ctx, session, loop, _ = _assemble(MockLLM().then_text("原话"))
+
+    def rewrite(payload: dict, next_: Callable[[], dict]) -> dict:
+        stop = next_()                       # 先看默认怎么判（放行、原样文本），再在其上改写
+        return {"continue": True, "text": f"【{stop['text']}】"}
+
+    ctx.on("agent/turn-stopping", rewrite)
+
+    outcome = loop.turn("在吗")
+
+    assert outcome == {"status": "done", "text": "【原话】"}
+    # 落日志的是采纳后的文本：模型可见历史与答复一致
+    assert [e["content"] for e in session.events if e["type"] == "assistant/message"] == ["【原话】"]
+    assert [e["status"] for e in session.events if e["type"] == "turn/end"] == ["done"]
+
+
+def test_turn_stopping_subscriber_can_force_the_turn_to_end():
+    """订阅者返回 `{"continue": False, "status": ..., "text": ...}` 即以该结局强制收尾：不再采样。"""
+    llm = MockLLM().then_text("不该被采纳的原话")
+    ctx, session, loop, _ = _assemble(llm)
+    ctx.on("agent/turn-stopping",
+           lambda payload, next_: {"continue": False, "status": "terminal", "text": "就此收场"})
+
+    outcome = loop.turn("在吗")
+
+    assert outcome == {"status": "terminal", "text": "就此收场"}
+    assert [e["content"] for e in session.events if e["type"] == "assistant/message"] == ["就此收场"]
+    assert [e["status"] for e in session.events if e["type"] == "turn/end"] == ["terminal"]
+    assert len(llm.calls) == 1, "强制收尾之后不再采样"
+
+
+def test_turn_stopping_covers_the_denial_ending_too():
+    """收尾 seam 覆盖 `Loop` 的全部自主收尾：`ending=denied` 现场也可被强制改判。
+
+    这是取消策略的第三条路：取消落在采样期、模型带回的 tool_calls 全被 guard 拒绝时，
+    本轮沿 `denied` 通道走到收尾——订阅者在那里把它改判为 `cancelled`，审计日志里一次
+    被取消的回合不再与「策略拒绝」不可区分。
+    """
+    llm = (MockLLM()
+           .then_tool_call("write_file", {"path": "x.txt", "content": "y"})
+           .then_text("不应走到这一步"))
+    ctx, session, loop, _ = _assemble(
+        llm,
+        plugins=[PermissionPlugin(denied={"write_file"})],
+        tools=[ToolDefinition("write_file", "写文件", WRITE_PARAMS,
+                              lambda a: "written")],
+    )
+    ctx.on("agent/turn-stopping", lambda payload, next_: (
+        {"continue": False, "status": "cancelled", "text": "⏹️ 已取消本轮"}
+        if payload["ending"] == "denied" else next_()))
+
+    outcome = loop.turn("把 y 写进 x.txt")
+
+    assert outcome == {"status": "cancelled", "text": "⏹️ 已取消本轮"}
+    assert [e["status"] for e in session.events if e["type"] == "turn/end"] == ["cancelled"]
+
+
+# ═══════════════ S2 主 seam（集成）：其余结局码 ═══════════════
+def test_turn_returns_rejected_outcome_when_pre_step_refuses_entry():
+    """pre-step 拒绝放行 → `rejected` 结局：输入不入日志、模型不被采样。"""
+    llm = MockLLM().then_text("不应走到这一步")
+    ctx, session, loop, _ = _assemble(llm)
+    ctx.on("agent/pre-step", lambda payload, next_: {"enter": False, "reason": "输入太长"})
+
+    outcome = loop.turn("这句话太长了")
+
+    assert outcome == {"status": "rejected", "text": "输入太长"}
+    assert [e["type"] for e in session.events] == ["turn/start", "turn/end"]
+    assert [e["status"] for e in session.events if e["type"] == "turn/end"] == ["rejected"]
+    assert llm.calls == []
+
+
+def test_turn_returns_max_steps_outcome_when_the_model_never_stops_calling_tools():
+    """模型永远只回 tool_calls：步数用尽 → `max-steps` 结局，横幅即答复文本。"""
+    llm = MockLLM()
+    llm.script = [{"text": "", "tool_calls": [{"id": f"c{i}", "name": "calculate",
+                                               "args": {"expression": "1 + 1"}}]}
+                  for i in range(3)]
+    _, session, loop, _ = _assemble(
+        llm, tools=[ToolDefinition("calculate", "算数", CALC_PARAMS,
+                                   lambda a: str(eval(a["expression"])))])  # noqa: S307
+
+    outcome = loop.turn("算下去", max_steps=3)
+
+    assert outcome == {"status": "max-steps", "text": "⚠️ 达到最大步数限制"}
+    assert [e["status"] for e in session.events if e["type"] == "turn/end"] == ["max-steps"]
+    assert len(llm.calls) == 3
 
 
 # ═══════════════ T4：语义检查点（写盘屏障） ═══════════════

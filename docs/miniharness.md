@@ -114,11 +114,10 @@ flowchart LR
     `next_`，挂在那里的守卫会被短路、永不被调用（`deny` 比 `ask` 更严，单调收紧的语义不变）。
   - `tools/execute` 的**入口复查**：重试重入 `tools/execute` 是「重新进流水线」，不重跑
     pre-execute / guard——退避期间到来的取消因此在这里收住，一个进程也不起。
-  - `agent/post-tool`：权威结果为 `cancelled` → 本轮就此收尾、不再采样。
-  - llm seam：取消之后模型**只回文本**时，那条文本换成取消说明（`⏹️ 已取消本轮：…`）——没有
-    工具调用的这一路，`agent/post-tool` 不会被派发，而 `Loop` 收到纯文本就自己写
-    `turn/end=done` 并把它当答案返回。`turn/end` 的词表归 `Loop`，策略不代写，所以这条路径的
-    收场是「`done` + 取消说明」：模型可见历史（日志里的 `assistant/message`）与用户看到的答复
+  - `agent/post-tool`：权威结果为 `cancelled` → 本轮以 `cancelled` 结局就此收尾、不再采样。
+  - `agent/turn-stopping`：取消后的 `Loop` 自主收尾一律改判为取消——模型只回文本时那条文本
+    不当作答复，换成取消说明（`⏹️ 已取消本轮：…`）；工具全被拒、步数用尽也同此改判。模型可见
+    历史（日志里的 `assistant/message`）、`turn/end`（结局码 `cancelled`）与用户看到的答复
     都写着这轮是被人取消的，不是一次什么都没发生的正常收尾。
   **没有命令在跑时**：取消请求无处可终止（`cancel()` 返回 False），本轮同样就此打住、不退出。
 - **每次尝试各有各的册**：`timed_out` 可重试（`capabilities.retry.definition.RETRYABLE_OUTCOMES`），
@@ -252,7 +251,7 @@ llm = (MockLLM()
        .then_tool_call("calculate", {"expression": "6*7"})
        .then_text("42"))
 ctx, session, loop = build_harness(model="mock", llm=llm, store_dir="./agent_sessions")
-print(loop.turn("6*7 是多少"))
+print(loop.turn("6*7 是多少")["text"])
 print([e["type"] for e in session.events])
 ```
 

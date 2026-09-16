@@ -318,5 +318,5 @@ def chat_loop(
         # ── 正常对话 ──
         else:
             with interrupts.armed(ctx):      # 回合执行期间：中断＝取消请求（装配层的收尾，Loop 零策略）
-                answer = loop.turn(user_input)
-            print(f"Agent: {answer}\n")
+                outcome = loop.turn(user_input)
+            print(f"Agent: {outcome['text']}\n")
