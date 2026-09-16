@@ -154,8 +154,9 @@ AC3「契约包与高频变动包分离」在 `capabilities.persistence`、`capa
 与 `capabilities.retry` 已成立为**内容分离**（T12 拆分）：`persistence` 的 `definition/` 只留低频契约——格式版本
 词汇（`LOG_FORMAT` / `LOG_VERSION` / `LEGACY_LOG_VERSION` / `log_filename`）与磁盘语义；
 迁移链、日志读写、`Store` / `PersistenceManager` 全部落在 `provider/`。`compaction` 的
-`definition/` 只留 `compaction_summaries`（从事件日志投影摘要链）；阈值、摘要提示词与
-切分策略连同 `CompactionConfig` / `ContextManager` 全部落在 `provider/`。`skills` 的
+`definition/` 只留 `compaction_summaries`（从事件日志投影摘要链）；阈值与 token 计数
+连同 `CompactionConfig` / `ContextManager`，切分与增量合并语义连同 `CompactionPlugin`
+（摘要函数可注入，默认 `stub_summarizer`）全部落在 `provider/`。`skills` 的
 `definition/` 只留 `skill/*` 事件词汇、`active_skills` 投影与 `Skill` 形状，`SkillManager`
 的注册 / 装载 / 卸载实现全部落在 `provider/`。`retry` 的 `definition/` 只留中止结局码契约
 （`RETRYABLE_OUTCOMES` / `is_retryable_outcome`），`with_retry` 的退避循环与参数默认值、

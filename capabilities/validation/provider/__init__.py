@@ -212,53 +212,6 @@ def make_final_output_tool(
     return tool_def, final_output
 
 
-# ═══════════════════════════════════════════════════════════════
-# 使用示例
-# ═══════════════════════════════════════════════════════════════
-#
-# weather_schema = {
-#     "type": "object",
-#     "properties": {
-#         "city": {
-#             "type": "string",
-#             "description": "城市名",
-#         },
-#         "condition": {
-#             "type": "string",
-#             "description": "天气状况，如晴、雨、多云",
-#         },
-#         "temperature": {
-#             "type": "number",
-#             "description": "温度（摄氏度）",
-#         },
-#         "summary": {
-#             "type": "string",
-#             "description": "一句话总结天气",
-#         },
-#     },
-#     "required": ["city", "condition", "temperature"],
-# }
-#
-# # 创建工具
-# weather_tool, weather_handler = make_final_output_tool(
-#     name="output_weather",
-#     description="输出天气查询的最终结果。调用此工具表示回答完成。",
-#     output_schema=weather_schema,
-# )
-#
-# # 注册到 SkillManager
-# skills.register(Skill(
-#     name="weather-output",
-#     description="天气结果结构化输出",
-#     tools=[weather_tool],
-#     tool_map={"output_weather": weather_handler},
-#     system_prompt=(
-#         "查询天气后，必须调用 output_weather 输出结构化结果。"
-#         "不要直接返回文本。"
-#     ),
-# ))
-
-
 # ═══════════════ 输出校验：Validation → tools/post-execute ═══════════════
 class ValidationPlugin(Plugin):
     """输出校验策略：订阅 `tools/post-execute`，复用本包的 `sanitize_output` / `validate_output`

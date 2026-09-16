@@ -5,8 +5,11 @@
 """
 from __future__ import annotations
 
+import pytest
+import tiktoken
+
 from capabilities.compaction.definition import compaction_summaries
-from capabilities.compaction.provider import CompactionConfig, CompactionPlugin
+from capabilities.compaction.provider import CompactionConfig, CompactionPlugin, ContextManager
 from miniharness.core import Context
 from miniharness.session import Session
 
@@ -44,3 +47,14 @@ def test_compaction_state_is_rebuilt_from_the_log_alone():
         session.append("user/message", content=LONG)
     assert plugin.compact_if_needed() is not None
     assert seen[0][0] == "第一份摘要"
+
+
+def test_encoder_loads_lazily_so_construction_needs_no_network(monkeypatch):
+    """#15：get_encoding 首次调用需联网下载编码文件；构造不得触发它，否则离线环境无法启动。"""
+    def _boom(name):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(tiktoken, "get_encoding", _boom)
+    cm = ContextManager(CompactionConfig())
+    CompactionPlugin(CompactionConfig())  # 装配面同样不得触发：harness 启动即崩则修复无效
+    with pytest.raises(RuntimeError):
+        cm.count_tokens([{"role": "user", "content": "hi"}])

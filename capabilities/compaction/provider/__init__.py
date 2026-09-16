@@ -20,16 +20,13 @@ legacy 注记（原 `capabilities.compaction.definition` 模块文件头，逐�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Iterable
+from typing import Any, Callable, Iterable
 
 import tiktoken
 
 from capabilities.compaction.definition import compaction_summaries
 from miniharness.core import Context, Plugin
 from miniharness.session import Session
-
-if TYPE_CHECKING:
-    from openai import OpenAI
 
 __all__ = ["CompactionConfig", "CompactionPlugin", "ContextManager", "stub_summarizer"]
 
@@ -43,24 +40,11 @@ class CompactionConfig:
     max_tokens: int = 2000        # 超过此阈值触发压缩
     target_tokens: int = 500     # 压缩后目标 token 数
     keep_last_n: int = 5          # 最近 N 条消息永不压缩
-    summary_model: str = "deepseek-v4-flash"  # 用便宜模型做摘要
 
 
 # ═══════════════════════════════════════════════════════════
 # 工具函数：消息类型统一
 # ═══════════════════════════════════════════════════════════
-
-def to_dict(msg) -> dict:
-    """把 ChatCompletionMessage 或 dict 统一转成 dict"""
-    if isinstance(msg, dict):
-        return msg
-    if hasattr(msg, "model_dump"):
-        return msg.model_dump(exclude_none=True)
-    if hasattr(msg, "dict"):
-        return msg.dict(exclude_none=True)
-    # 兜底：手动提取
-    return {"role": getattr(msg, "role", ""), "content": getattr(msg, "content", "")}
-
 
 def to_text(msg: dict) -> str:
     """单条消息转纯文本"""
@@ -85,17 +69,24 @@ class ContextManager:
 
     def __init__(self, config: CompactionConfig | None = None):
         self.config = config or CompactionConfig()
-        # 直接用 cl100k_base，兼容 DeepSeek 等所有模型
-        self.encoder = tiktoken.get_encoding("cl100k_base")
+        # get_encoding 首次调用需联网下载编码文件，延迟到首次计数，离线环境才能完成装配启动
+        self._encoder = None
         self.summary: str = ""
         self.total_compactions: int = 0
+
+    @property
+    def encoder(self) -> tiktoken.Encoding:
+        """cl100k_base 编码器：首次访问才加载（get_encoding 需联网下载编码文件）。"""
+        if self._encoder is None:
+            self._encoder = tiktoken.get_encoding("cl100k_base")
+        return self._encoder
 
     def restore(self, summaries: list[str]) -> None:
         """从事件日志重放恢复压缩状态（摘要链：末项是当前增量摘要，条数是累计压缩次数）。"""
         self.summary = summaries[-1] if summaries else ""
         self.total_compactions = len(summaries)
 
-    # ── 策略 1：精确 token 计数 ─────────────────────
+    # ── 精确 token 计数 ─────────────────────
     def count_tokens(self, messages: list[dict]) -> int:
         """计算 messages 列表的精确 token 数"""
         total = 0
@@ -108,123 +99,11 @@ class ContextManager:
                     total += len(self.encoder.encode(str(value)))
         return total
 
-    # ── 策略 2：滑动窗口（简单粗暴） ────────────────
-    def sliding_window(self, messages: list[dict]) -> list[dict]:
-        """只保留 system prompt + 最近 N 条消息"""
-        system_msgs = [m for m in messages if m["role"] == "system"]
-        recent = messages[-self.config.keep_last_n:]
-        result = []
-        for sm in system_msgs:
-            if sm not in recent:
-                result.append(sm)
-        result.extend(recent)
-        return result
-
-    # ── 策略 3：摘要压缩（推荐） ────────────────────
-    def summarize_and_compress(
-        self, messages: list[dict], client: OpenAI
-    ) -> list[dict]:
-        """
-        把旧消息替换成摘要 + 保留最近 N 条
-        增量合并：新摘要 = 合并(旧摘要, 新对话)
-        """
-        n = self.config.keep_last_n
-        if len(messages) <= n + 2:
-            return messages
-
-        # 分割：旧消息 vs 保留的新消息
-        split_point = max(1, len(messages) - n)
-        old_messages = messages[:split_point]
-        recent_messages = messages[split_point:]
-
-        # system prompt 永远保留在最前面
-        system_msgs = [m for m in messages if m["role"] == "system"]
-
-        # 把旧消息转成文本
-        old_text = "\n".join(
-            t for m in old_messages if (t := to_text(m))
-        )
-
-        # 生成增量摘要
-        new_summary = self._generate_summary(client, old_text)
-        self.summary = new_summary
-        self.total_compactions += 1
-
-        # 组装结果
-        compressed: list[dict] = []
-
-        # 1) system prompt
-        compressed.extend(system_msgs)
-
-        # 2) 注入摘要
-        compressed.append({
-            "role": "system",
-            "content": f"[历史对话摘要 — 第{self.total_compactions}次压缩]\n{new_summary}\n\n以下是最近的对话：",
-        })
-
-        # 3) 最近消息原样保留
-        compressed.extend(recent_messages)
-
-        return compressed
-
-    def _generate_summary(self, client: OpenAI, new_text: str) -> str:
-        """用便宜模型把对话压缩成一段摘要（增量合并）"""
-        existing = self.summary
-        prompt = f"""将以下对话内容压缩成一段简洁的摘要，保留所有关键信息和决策。
-
-已有的历史摘要:
-{existing if existing else "(无)"}
-
-新增对话内容:
-{new_text}
-
-要求:
-- 保留关键事实、数字、决定、用户偏好
-- 去除冗余对话轮次
-- 摘要不超过 500 字
-- 合并新旧内容，输出一份完整摘要"""
-
-        response = client.chat.completions.create(
-            model=self.config.summary_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        return response.choices[0].message.content or ""
-
-    # ── 主入口 ─────────────────────────────────────
-    def maybe_compact(
-        self, messages: list[dict], client: OpenAI
-    ) -> list[dict]:
-        print(f"current state: {self.stats(messages)}")
-        """检查 token 用量，超标则压缩"""
-        current = self.count_tokens(messages)
-
-        if current > self.config.max_tokens:
-            print(f"\n⚠️ Token 超限 ({current}/{self.config.max_tokens})，触发压缩...")
-            compressed = self.summarize_and_compress(messages, client)
-            new_count = self.count_tokens(compressed)
-            print(f"✅ 压缩完成: {current} → {new_count} tokens (节省 {current - new_count})")
-            return compressed
-
-        return messages  # 不超标，原样返回
-
-    # ── 诊断工具 ───────────────────────────────────
-    def stats(self, messages: list[dict]) -> str:
-        """打印当前上下文状态"""
-        tokens = self.count_tokens(messages)
-        pct = tokens / self.config.max_tokens * 100
-        return (
-            f"上下文: {tokens}/{self.config.max_tokens} tokens ({pct:.0f}%) | "
-            f"消息数: {len(messages)} | "
-            f"累计压缩: {self.total_compactions}次"
-        )
-
 
 # ═══════════════ 上下文治理：Compaction → agent/pre-step ═══════════════
 def stub_summarizer(existing: str, new_text: str) -> str:
     """确定性摘要 stub（不调 LLM）：增量合并已有摘要 + 新对话首几行。
 
-    形状与 `ContextManager._generate_summary` 一致：
     输入 `(已有摘要, 新增对话文本)`，输出合并后的完整摘要。
     """
     lines = [line.strip() for line in new_text.splitlines() if line.strip()]
@@ -237,8 +116,8 @@ def stub_summarizer(existing: str, new_text: str) -> str:
 class CompactionPlugin(Plugin):
     """上下文治理策略：订阅 `agent/pre-step`，超阈值时对 Session 做 surface 替换。
 
-    阈值、切分点、keep_last_n、增量摘要语义全部复用 `ContextManager`
-    （`count_tokens` / `config` / `summary` / `total_compactions` / `to_text`）。
+    阈值与 keep_last_n 来自 `CompactionConfig`；token 计数与压缩状态复用 `ContextManager`
+    （`count_tokens` / `config` / `summary` / `total_compactions`）。切分点与增量合并语义在本插件。
     摘要函数可注入，默认 `stub_summarizer`（确定性，不调真实 LLM）。
     """
 
@@ -277,7 +156,7 @@ class CompactionPlugin(Plugin):
 
         keep = config.keep_last_n
         if len(messages) <= keep + 2:
-            return None                                    # 与 summarize_and_compress 的守卫一致
+            return None                                    # 不足 keep_last_n + 2 条：没有可压缩的旧消息
 
         split = max(1, len(messages) - keep)
         # system prompt 永不压缩（legacy 也是把它们原样提到最前面）
