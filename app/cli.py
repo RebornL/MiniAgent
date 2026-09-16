@@ -2,11 +2,12 @@
 
 每轮只调 `loop.turn(user_input)`；装配与恢复都交给 `app.assembly`。
 
-本模块另外在 harness 上装两样东西，都是装配层的事（`Loop` 仍零策略）：
+本模块把两样东西接上 harness（`Loop` 仍零策略）——审批者的**安装**已归装配点
+（`assembly.open_harness(approver=...)`），这里只出**裁决者**：
 
-- `tools/approve` 审批者（`install_approver`）：装配层为 `run_command` 装了 `ask`，由这里的
+- `tools/approve` 审批者（`cli_approver`）：装配层为 `run_command` 装了 `ask`，由这里的
   人看过**完整 argv 与 cwd** 后放行 / 拒绝。审批只在事件总线上裁决，不改工具流水线、不进 Loop；
-  拒绝与非交互输入一律不放行，工具体不执行。
+  拒绝与非交互输入一律不放行，工具体不执行。`install_approver` 保留为测试 / 手工接线 helper。
 - **取消源**（`InterruptSource`）：**回合执行期间**的 Ctrl-C 不再是「整个进程退出」，而是一次
   取消请求——`ctx.get("abort").cancel(...)`（`ToolTimeoutPlugin`，与超时同一条终止路径）终止
   正在跑的受管范围，该回合以结构化的 `cancelled` 结局收场，聊天循环照常继续。
@@ -109,8 +110,8 @@ def install_approver(ctx: Context,
                      ) -> Callable[[], None]:
     """在 harness 的事件总线上装 `tools/approve` 审批者，返回退订器。
 
-    `assembly.open_harness` 把装配好的 `(loop, ctx)` 一并交出，事件总线就在 ctx 上——
-    接线点是它，不必去够 `Loop` 的私有面。每开一次新 harness（`/new`、`/switch`）都要重新装。
+    生产安装路径在装配点：`assembly.open_harness(approver=...)`（CLI 经 `chat_loop` 显式传
+    `cli_approver()`）。本函数保留为测试 / 手工接线 helper——直接在 ctx 上装、可退订。
     `approver` 缺省是读真实 stdin 的 `cli_approver()`，测试可注入替代实现。
     """
     return ctx.on("tools/approve",
@@ -237,12 +238,11 @@ def chat_loop(
     print("输入 /exit 退出，/history 查看历史会话，/switch <id> 切换会话\n")
 
     def _open(sid: str) -> tuple[Loop, Context]:
-        """开一个 harness 并装上审批者——每次重开都是新的 Context，要重新装。"""
-        opened, ctx = assembly.open_harness(
+        """开一个 harness：审批者随装配点安装（显式传 cli_approver），每次重开都是新的装配。"""
+        return assembly.open_harness(
             pm, sid, model=model, store_dir=store_dir,
-            client=client, llm=llm, base_system_prompt=base_system_prompt)
-        install_approver(ctx)
-        return opened, ctx
+            client=client, llm=llm, base_system_prompt=base_system_prompt,
+            approver=cli_approver())
 
     loop, ctx = _open(session_id)
 

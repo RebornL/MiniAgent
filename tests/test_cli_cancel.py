@@ -93,7 +93,7 @@ def _chat(monkeypatch, tmp_path, llm: MockLLM, inputs: list[str], *,
     """
     typed = list(inputs)
     captured: list[Context] = []
-    real_install, real_open = cli.install_approver, assembly.open_harness
+    real_open = assembly.open_harness
 
     def fake_input(prompt: str = "") -> str:
         if not typed:
@@ -108,8 +108,10 @@ def _chat(monkeypatch, tmp_path, llm: MockLLM, inputs: list[str], *,
         return loop, ctx
 
     monkeypatch.setattr(builtins, "input", fake_input)
-    monkeypatch.setattr(cli, "install_approver",
-                        lambda ctx: real_install(ctx, lambda payload, next_: {"kind": "allow"}))
+    # 审批者随装配点安装（open_harness(approver=cli_approver())）：换掉 adapter 的构造，
+    # 真实的安装路径照走——一律放行（本票验的是中断，不是审批）。
+    monkeypatch.setattr(cli, "cli_approver",
+                        lambda **_: lambda payload, next_: {"kind": "allow"})
     monkeypatch.setattr(assembly, "open_harness", open_capturing)
     chat_loop(model="mock", session_id="s1", store_dir=str(tmp_path),
               llm=llm, interrupts=interrupts)

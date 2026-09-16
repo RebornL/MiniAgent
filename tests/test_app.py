@@ -26,9 +26,12 @@ from app import assembly
 from app.assembly import build_harness, open_harness, resume_session
 from capabilities.compaction.definition import compaction_summaries
 from capabilities.persistence.provider import META_FILE, PersistenceManager, Store
+from capabilities.shell.definition import RUN_COMMAND_NAME
 from miniharness.core import Context, Plugin
 from miniharness.session import Session
+from miniharness.tools.contract import OK
 from providers.mock import MockLLM
+from tests.support import _marker_command
 
 LONG = "这是一段很长的历史对话内容，用来把 token 数推过阈值。" * 6
 
@@ -209,6 +212,48 @@ def test_restart_restores_the_active_skill_from_the_log_alone(tmp_path):
             if e["type"] == "tool/result"] == ["load_skill", "calculate"]
     meta = _meta(tmp_path, "s1")
     assert "summary" not in meta and "active_skills" not in meta
+
+
+def _persisted_session_with_shell_loaded(tmp_path: Path) -> None:
+    """落盘一个装了 shell 技能的会话：重放 seam 会重建 `run_command` 的注册（issue #17）。"""
+    llm = MockLLM().then_tool_call("load_skill", {"name": "shell"}).then_text("装好了")
+    _, _, loop = build_harness(model="mock", session_id="s1",
+                               store_dir=str(tmp_path), llm=llm)
+    loop.turn("装上 shell")
+
+
+def test_resume_with_an_approver_executes_the_approved_command(tmp_path):
+    """恢复出的会话也带审批者：安装随装配点走（open_harness(approver=...)），命令真的执行。"""
+    _persisted_session_with_shell_loaded(tmp_path)
+    marker = tmp_path / "ran.txt"
+    llm2 = (MockLLM()
+            .then_tool_call("run_command", {"argv": _marker_command(marker)})
+            .then_text("跑完了"))
+
+    assert resume_session("s1", "跑一下", model="mock", store_dir=str(tmp_path),
+                          llm=llm2,
+                          approver=lambda payload, next_: {"kind": "allow"}) == "跑完了"
+
+    assert marker.read_text(encoding="utf-8") == "ran"     # 放行 → 工具体真的执行
+    assert [e["status"] for e in PersistenceManager(Store(str(tmp_path))).load_events("s1")
+            if e["type"] == "tool/result" and e["name"] == RUN_COMMAND_NAME] == [OK]
+
+
+def test_resume_without_an_approver_denies_run_command(tmp_path):
+    """deny-on-resume 升格为契约断言：恢复时不带审批者 → 默认拒绝，工具体不执行。"""
+    _persisted_session_with_shell_loaded(tmp_path)
+    marker = tmp_path / "ran.txt"
+    llm2 = (MockLLM()
+            .then_tool_call("run_command", {"argv": _marker_command(marker)})
+            .then_text("不该走到这一步"))
+
+    answer = resume_session("s1", "跑一下", model="mock", store_dir=str(tmp_path), llm=llm2)
+
+    assert RUN_COMMAND_NAME in answer                      # 拒绝理由沿结果通道交给调用方
+    assert not marker.exists()
+    denied = [e for e in PersistenceManager(Store(str(tmp_path))).load_events("s1")
+              if e["type"] == "tool/denied"]
+    assert [e["name"] for e in denied] == [RUN_COMMAND_NAME]
 
 
 def test_a_legacy_v0_session_resumes_with_its_skills_and_summary_chain(tmp_path):

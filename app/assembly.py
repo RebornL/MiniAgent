@@ -11,6 +11,8 @@
 进程边界另有两个独立 seam：沙箱（包装 argv，不可用即 fail-closed）与受管范围（起进程 /
 等退出 / 终止），两者都在这里装配，谁都不认识策略。
 """
+from typing import Any, Callable
+
 from openai import OpenAI
 
 from app import config, tools
@@ -179,6 +181,7 @@ def open_harness(
     client: OpenAI | None,
     base_system_prompt: str,
     llm: LLM | None = None,
+    approver: Callable[[dict, Callable[[], Any]], dict] | None = None,
 ) -> tuple[Loop, Context]:
     """装配 harness 并从事件日志重放会话状态，把 `(loop, ctx)` 一并交给调用方。
 
@@ -186,12 +189,17 @@ def open_harness(
     `session/replayed`（携带完整事件日志）——日志派生状态的折叠由该事件的订阅方完成，
     不读任何旁路元数据。
 
-    公开交出 ctx（`build_harness` 本就返回它），是让装配入口成为事件 seam 的**接线点**：
-    CLI 的审批者装在 ctx 上，不必去够 `Loop` 的私有面（`Loop` 的公开面只有 `turn` / `apply`）。
+    审批者与其余策略插件一样在**装配点**接线：监听器就装在 ctx 的事件总线上
+    （不必去够 `Loop` 的私有面）。`approver=None` = 不装监听器 = `ask` 无人应答即默认
+    拒绝——fail-closed 契约对恢复出的会话同样成立。
     """
     ctx, session, loop = build_harness(model=model, session_id=session_id,
                                        store_dir=store_dir, client=client, llm=llm,
                                        base_system_prompt=base_system_prompt)
+    # 装在重放之前：接线齐了才开跑——交给调用方的 harness 从第一个工具调用起就有人裁决
+    # （审批只在回合执行期发生，重放本身不发审批请求，装在 emit 前后并无可观察差别）。
+    if approver is not None:
+        ctx.on("tools/approve", approver)
     events = pm.load_events(session_id)
     if events:
         session.replay(events)
@@ -208,12 +216,17 @@ def resume_session(
     store_dir: str = "./agent_sessions",
     client: OpenAI | None = None,
     llm: LLM | None = None,
+    approver: Callable[[dict, Callable[[], Any]], dict] | None = None,
 ) -> str:
-    """恢复历史会话并继续对话：重放日志（投影 / 压缩摘要 / 技能状态）后跑一轮。"""
+    """恢复历史会话并继续对话：重放日志（投影 / 压缩摘要 / 技能状态）后跑一轮。
+
+    `approver` 原样透传给 `open_harness`：带审批者则恢复后可执行已批准命令；
+    `None` = 无人裁决，`run_command` 默认拒绝（fail-closed）。
+    """
     pm = PersistenceManager(Store(store_dir))
     if not pm.load_events(session_id):
         return f"❌ 会话 {session_id} 不存在或为空"
     loop, _ = open_harness(pm, session_id, model=model, store_dir=store_dir,
-                           client=client, llm=llm,
+                           client=client, llm=llm, approver=approver,
                            base_system_prompt=base_system_prompt)
     return loop.turn(new_input)["text"]

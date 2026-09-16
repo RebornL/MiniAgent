@@ -19,8 +19,8 @@ python -m app                 # 交互式对话（需要根目录 config.json）
 | --- | --- |
 | `app.config` | `config.json` 的惰性读取（导入期不碰配置，全新 clone 上 `import app` 必须成功） |
 | `app.tools` | 应用侧的工具定义与技能描述：`TOOLS` 是唯一来源，`make_final_output_tool` / `final_output_handler` 也在其中（工具契约的消费方） |
-| `app.assembly` | `build_harness()` / `resume_session()` / `register_skills()`：把 Session + 工具 + provider + 策略插件 + 日志消费者装起来 |
-| `app.cli` | `chat_loop()`：交互式多轮对话，每轮只调 `loop.turn(user_input)`（含 `/exit` `/help` `/history` `/switch` `/new`）；`install_approver()` / `cli_approver()`：装 `tools/approve` 审批者，`run_command` 由人看着完整 argv 与 cwd 放行 / 拒绝；`InterruptSource`：**回合执行期间**的中断＝一次取消请求（`ctx.get("abort").cancel(...)`，与超时同一条终止路径）——**只做信号装配**（装 / 还原 SIGINT、划出窗口），取消之后的守卫与收尾归能力层（`capabilities.timeout.provider.TurnCancelPlugin`） |
+| `app.assembly` | `open_harness()` / `resume_session()` / `build_harness()` / `register_skills()`：把 Session + 工具 + provider + 策略插件 + 日志消费者装起来；审批者的**安装**也在装配点（`open_harness(approver=...)`，`resume_session` 透传；`None` = 默认拒绝） |
+| `app.cli` | `chat_loop()`：交互式多轮对话，每轮只调 `loop.turn(user_input)`（含 `/exit` `/help` `/history` `/switch` `/new`）；`cli_approver()`：`run_command` 的审批 adapter——人看着完整 argv 与 cwd 放行 / 拒绝（安装归 `app.assembly.open_harness(approver=...)` 装配点，`chat_loop` 显式传入；`install_approver()` 是测试 / 接线 helper）；`InterruptSource`：**回合执行期间**的中断＝一次取消请求（`ctx.get("abort").cancel(...)`，与超时同一条终止路径）——**只做信号装配**（装 / 还原 SIGINT、划出窗口），取消之后的守卫与收尾归能力层（`capabilities.timeout.provider.TurnCancelPlugin`） |
 | `app.__main__` | 入口：`python -m app` |
 | `app.skeleton_demo` | 骨架 smoke run：`python -m app.skeleton_demo`（离线，依赖驱动激活顺序 + deny 分支） |
 | `app.stack_demo` | 全栈 smoke run：`python -m app.stack_demo`（离线，压缩 / 重试 / 超时 / 持久化 / 追踪 / 技能） |
@@ -31,9 +31,10 @@ python -m app                 # 交互式对话（需要根目录 config.json）
 1. 工具不预注册：只随技能装载经 `SkillRegistry` 可逆注册（`unload_skill` 即撤销）——
    包化前就是这样，未改；
 2. 审批策略装得**很窄**：只对 `run_command` 给出 `ask`（工具体不执行，直到有审批者放行）。
-   审批者由 CLI 装（`app.cli.install_approver`）：交互终端里展示完整 argv 与 cwd 后由人放行 /
-   拒绝；**非交互输入（无 TTY / 管道 / EOF）默认拒绝**，不放行。其余工具的行为与 legacy 一致
-   ——legacy 没有审批概念，只有真正执行外部命令的工具需要这道门槛；
+   审批者在装配点装（`open_harness(approver=...)`，CLI 显式传 `cli_approver()`，`resume_session`
+   透传）：交互终端里展示完整 argv 与 cwd 后由人放行 / 拒绝；**非交互输入（无 TTY / 管道 / EOF）
+   与不带审批者的恢复一律默认拒绝**，不放行。其余工具的行为与 legacy 一致——legacy 没有审批
+   概念，只有真正执行外部命令的工具需要这道门槛；
 3. `shell` 技能默认**不装载**：模型要先 `load_skill('shell')` 才能看见 `run_command`；
    它的工具与结果形状来自能力族（`capabilities.shell`），先过沙箱 seam、再经受管范围执行，
    可被策略层终止。
