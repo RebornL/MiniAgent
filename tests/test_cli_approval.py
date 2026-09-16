@@ -40,7 +40,7 @@ def _assembled(tmp_path, approver):
     llm = (MockLLM()
            .then_tool_call(APPROVAL_SCOPE, {"argv": ARGV, "cwd": str(tmp_path)})
            .then_text("完成"))
-    ctx, session, loop = build_harness(model="mock", session_id="s1",
+    ctx, session, loop = build_harness(session_id="s1",
                                        store_dir=str(tmp_path), llm=llm)
     install_approver(ctx, approver)
     marker = tmp_path / "ran.txt"
@@ -150,7 +150,7 @@ def test_installing_the_approver_leaves_other_tools_unapproved(tmp_path):
         asked.append(text)
         return "n"
 
-    ctx, _, loop = build_harness(model="mock", session_id="s1", store_dir=str(tmp_path),
+    ctx, _, loop = build_harness(session_id="s1", store_dir=str(tmp_path),
                                  llm=MockLLM())
     install_approver(ctx, cli_approver(prompt=prompt))
     ctx.get("skills").load("calculator")
@@ -166,8 +166,8 @@ def test_open_harness_hands_back_the_context_the_cli_wires_approval_on(tmp_path)
     """A1：公开装配入口交出 `(loop, ctx)`——CLI 的接线点是 ctx，不借道 `Loop` 的私有面。"""
     pm = PersistenceManager(Store(str(tmp_path)))
     loop, ctx = assembly.open_harness(
-        pm, "s1", model="mock", store_dir=str(tmp_path),
-        client=None, base_system_prompt="", llm=MockLLM())
+        pm, "s1", store_dir=str(tmp_path),
+        base_system_prompt="", llm=MockLLM())
 
     assert isinstance(loop, Loop) and isinstance(ctx, Context)
 
@@ -185,7 +185,7 @@ def test_open_harness_hands_back_the_context_the_cli_wires_approval_on(tmp_path)
 
 def test_the_approval_gate_covers_the_name_exported_by_the_shell_definition(tmp_path):
     """A2：审批名单与工具定义同源——装配层若按别的名字开闸，这条会红。"""
-    ctx, _, _ = build_harness(model="mock", session_id="s1", store_dir=str(tmp_path),
+    ctx, _, _ = build_harness(session_id="s1", store_dir=str(tmp_path),
                               llm=MockLLM())
     asked: list[str] = []
     install_approver(ctx, cli_approver(prompt=lambda text: asked.append(text) or "n",

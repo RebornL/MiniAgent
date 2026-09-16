@@ -113,7 +113,7 @@ def _chat(monkeypatch, tmp_path, llm: MockLLM, inputs: list[str], *,
     monkeypatch.setattr(cli, "cli_approver",
                         lambda **_: lambda payload, next_: {"kind": "allow"})
     monkeypatch.setattr(assembly, "open_harness", open_capturing)
-    chat_loop(model="mock", session_id="s1", store_dir=str(tmp_path),
+    chat_loop(session_id="s1", store_dir=str(tmp_path),
               llm=llm, interrupts=interrupts)
     return captured[0]
 
@@ -184,7 +184,7 @@ def test_a_sigint_at_the_prompt_still_exits_the_chat_loop(monkeypatch, tmp_path,
         raise KeyboardInterrupt
 
     monkeypatch.setattr(builtins, "input", interrupt_then_raise)
-    chat_loop(model="mock", session_id="s1", store_dir=str(tmp_path),
+    chat_loop(session_id="s1", store_dir=str(tmp_path),
               llm=MockLLM().then_text("不应走到这一步"), interrupts=interrupts)
 
     assert "👋 再见" in capsys.readouterr().out

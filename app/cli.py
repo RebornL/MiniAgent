@@ -27,9 +27,7 @@ import sys
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
-from openai import OpenAI
-
-from app import assembly
+from app import assembly, config
 from capabilities.persistence.provider import PersistenceManager, Store
 from capabilities.shell.definition import RUN_COMMAND_NAME
 from miniharness.core import Context
@@ -202,12 +200,15 @@ class InterruptSource:
             return False, None
 
 
+def _print_delta(text: str) -> None:
+    """流式回显：边收边打印（呈现归 CLI——装配不再决定展示）。"""
+    print(text, end="", flush=True)
+
+
 def chat_loop(
-    client: OpenAI | None = None,
     base_system_prompt: str = "",
-    model: str = "deepseek-v4-flash",
     session_id: str | None = None,
-    store_dir: str = "./agent_sessions",
+    store_dir: str = config.DEFAULT_STORE_DIR,
     llm: LLM | None = None,
     interrupts: InterruptSource | None = None,
 ):
@@ -219,14 +220,20 @@ def chat_loop(
     循环（既有行为，见模块说明）。`llm` / `interrupts` 只为测试注入（`llm` 与
     `assembly.open_harness` 的同一个 seam；`interrupts` 用来在指定时刻注入一次中断）。
 
+    流式呈现在这里：`llm=None` 时在入口构造 `config._default_llm(on_delta=...)`——
+    全新 clone 上 config.json 缺失的 FileNotFoundError 也在此刻浮出（import 仍成功）。
+
     用法:
-      >>> chat_loop(client, "你是助手...")
+      >>> chat_loop("你是助手...")
       You: 北京天气怎么样？
       Agent: 北京今天晴，25°C
       You: /exit
     """
     pm = PersistenceManager(Store(store_dir))
     interrupts = InterruptSource() if interrupts is None else interrupts
+
+    if llm is None:
+        llm = config._default_llm(on_delta=_print_delta)
 
     # 如果没有传入 session_id，新建一个；传了则恢复该会话的历史
     if session_id is None:
@@ -240,8 +247,8 @@ def chat_loop(
     def _open(sid: str) -> tuple[Loop, Context]:
         """开一个 harness：审批者随装配点安装（显式传 cli_approver），每次重开都是新的装配。"""
         return assembly.open_harness(
-            pm, sid, model=model, store_dir=store_dir,
-            client=client, llm=llm, base_system_prompt=base_system_prompt,
+            pm, sid, store_dir=store_dir, llm=llm,
+            base_system_prompt=base_system_prompt,
             approver=cli_approver())
 
     loop, ctx = _open(session_id)

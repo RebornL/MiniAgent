@@ -70,7 +70,7 @@ def test_build_harness_keeps_tools_lazy_until_the_skill_is_loaded(tmp_path):
            .then_tool_call("calculate", {"expression": "6 * 7"})
            .then_text("6 * 7 = 42"))
 
-    ctx, session, loop = build_harness(model="mock", session_id="s1",
+    ctx, session, loop = build_harness(session_id="s1",
                                        store_dir=str(tmp_path), llm=llm)
 
     runtime = ctx.get("tools")
@@ -98,7 +98,7 @@ def test_build_harness_loaded_skill_provides_the_terminal_tool(tmp_path):
            .then_tool_call("load_skill", {"name": "structured-output"})
            .then_tool_call("final_output", {"result": {"city": "北京"}, "summary": "北京"})
            .then_text("不应走到这一步"))
-    _, _, loop = build_harness(model="mock", session_id="s2",
+    _, _, loop = build_harness(session_id="s2",
                                store_dir=str(tmp_path), llm=llm)
 
     outcome = loop.turn("查北京天气并结构化输出")
@@ -113,7 +113,7 @@ def test_skill_prompt_reaches_model_after_load(tmp_path):
            .then_tool_call("load_skill", {"name": "calculator"})
            .then_text("算好了"))
 
-    _, _, loop = build_harness(model="mock", session_id="s3",
+    _, _, loop = build_harness(session_id="s3",
                                store_dir=str(tmp_path), llm=llm)
     loop.turn("帮我算 2+2")
 
@@ -125,7 +125,7 @@ def test_skill_prompt_reaches_model_after_load(tmp_path):
 def test_restart_rebuilds_a_compacted_history_word_for_word(tmp_path):
     """AC2：压缩 → 重启 → 只靠重放，投影与压缩后逐字一致（meta.json 里没有摘要旁路）。"""
     llm = MockLLM().then_text("收到")
-    _, session, loop = build_harness(model="mock", session_id="s1",
+    _, session, loop = build_harness(session_id="s1",
                                      store_dir=str(tmp_path), llm=llm)
     for index in range(20):                                # 预置一段超阈值的历史
         role = "user" if index % 2 == 0 else "assistant"
@@ -139,7 +139,7 @@ def test_restart_rebuilds_a_compacted_history_word_for_word(tmp_path):
 
     # 重启：新 harness 只重放磁盘上的日志
     llm2 = MockLLM().then_text("继续")
-    assert resume_session("s1", "继续", model="mock", store_dir=str(tmp_path),
+    assert resume_session("s1", "继续", store_dir=str(tmp_path),
                           llm=llm2) == "继续"
 
     # 恢复后的那次采样：重放出的投影 == 压缩后的投影逐字 + 本轮新输入
@@ -154,7 +154,7 @@ def test_restart_rebuilds_a_compacted_history_word_for_word(tmp_path):
 def test_a_second_compaction_after_a_restart_merges_the_replayed_summary(tmp_path):
     """重启后接着压缩：`existing` 是重放出来的那份摘要，而不是空的（摘要链从日志重建）。"""
     llm = MockLLM().then_text("收到")
-    ctx, session, loop = build_harness(model="mock", session_id="s1",
+    ctx, session, loop = build_harness(session_id="s1",
                                        store_dir=str(tmp_path), llm=llm)
     for index in range(20):
         role = "user" if index % 2 == 0 else "assistant"
@@ -171,7 +171,7 @@ def test_a_second_compaction_after_a_restart_merges_the_replayed_summary(tmp_pat
     ctx.get("persistence").flush()
 
     llm2 = MockLLM().then_text("继续")
-    assert resume_session("s1", "继续", model="mock", store_dir=str(tmp_path),
+    assert resume_session("s1", "继续", store_dir=str(tmp_path),
                           llm=llm2) == "继续"
 
     stored = pm.load_events("s1")
@@ -190,7 +190,7 @@ def test_a_second_compaction_after_a_restart_merges_the_replayed_summary(tmp_pat
 def test_restart_restores_the_active_skill_from_the_log_alone(tmp_path):
     """AC3：技能装载 → 重启 → 只靠重放，技能状态与领域提示仍在（无需 load_skill 再来一次）。"""
     llm = MockLLM().then_tool_call("load_skill", {"name": "calculator"}).then_text("算好了")
-    _, session, loop = build_harness(model="mock", session_id="s1",
+    _, session, loop = build_harness(session_id="s1",
                                      store_dir=str(tmp_path), llm=llm)
     loop.turn("加载计算器")
 
@@ -203,7 +203,7 @@ def test_restart_restores_the_active_skill_from_the_log_alone(tmp_path):
     # 重启后直接调技能工具（不再 load_skill）：工具注册必须已由日志重放重建
     llm2 = MockLLM().then_tool_call("calculate", {"expression": "6 * 7"})
     llm2.script.append(_latest_tool_content)
-    assert resume_session("s1", "接着算", model="mock", store_dir=str(tmp_path),
+    assert resume_session("s1", "接着算", store_dir=str(tmp_path),
                           llm=llm2) == "42"
 
     assert any(m["role"] == "system" and "你拥有计算能力" in m["content"]
@@ -217,7 +217,7 @@ def test_restart_restores_the_active_skill_from_the_log_alone(tmp_path):
 def _persisted_session_with_shell_loaded(tmp_path: Path) -> None:
     """落盘一个装了 shell 技能的会话：重放 seam 会重建 `run_command` 的注册（issue #17）。"""
     llm = MockLLM().then_tool_call("load_skill", {"name": "shell"}).then_text("装好了")
-    _, _, loop = build_harness(model="mock", session_id="s1",
+    _, _, loop = build_harness(session_id="s1",
                                store_dir=str(tmp_path), llm=llm)
     loop.turn("装上 shell")
 
@@ -230,7 +230,7 @@ def test_resume_with_an_approver_executes_the_approved_command(tmp_path):
             .then_tool_call("run_command", {"argv": _marker_command(marker)})
             .then_text("跑完了"))
 
-    assert resume_session("s1", "跑一下", model="mock", store_dir=str(tmp_path),
+    assert resume_session("s1", "跑一下", store_dir=str(tmp_path),
                           llm=llm2,
                           approver=lambda payload, next_: {"kind": "allow"}) == "跑完了"
 
@@ -247,7 +247,7 @@ def test_resume_without_an_approver_denies_run_command(tmp_path):
             .then_tool_call("run_command", {"argv": _marker_command(marker)})
             .then_text("不该走到这一步"))
 
-    answer = resume_session("s1", "跑一下", model="mock", store_dir=str(tmp_path), llm=llm2)
+    answer = resume_session("s1", "跑一下", store_dir=str(tmp_path), llm=llm2)
 
     assert RUN_COMMAND_NAME in answer                      # 拒绝理由沿结果通道交给调用方
     assert not marker.exists()
@@ -273,7 +273,7 @@ def test_a_legacy_v0_session_resumes_with_its_skills_and_summary_chain(tmp_path)
     # resume 后直接调技能工具（不再 load_skill）：注册必须已由翻译出的日志重建
     llm = MockLLM().then_tool_call("calculate", {"expression": "6 * 7"})
     llm.script.append(_latest_tool_content)
-    assert resume_session(LEGACY_V0_ID, "接着算", model="mock", store_dir=str(store_dir),
+    assert resume_session(LEGACY_V0_ID, "接着算", store_dir=str(store_dir),
                           llm=llm) == "42"               # 工具真跑过才拿得到 42
     assert any(m["role"] == "system" and "你拥有计算能力" in m["content"]
                for m in llm.calls[0])                    # 领域提示也重建了
@@ -293,7 +293,7 @@ def test_a_legacy_v0_session_resumes_with_its_skills_and_summary_chain(tmp_path)
 def test_meta_holds_no_copy_of_model_visible_content(tmp_path):
     """F3：`meta.json` 只存可由日志重算的计数索引，列表要展示的末条输入按需重算。"""
     llm = MockLLM().then_text("收到")
-    _, _, loop = build_harness(model="mock", session_id="s1",
+    _, _, loop = build_harness(session_id="s1",
                                store_dir=str(tmp_path), llm=llm)
     loop.turn("北京天气如何")
 
@@ -310,14 +310,14 @@ def test_restart_replays_the_log_into_the_same_history_word_for_word(tmp_path):
            .then_tool_call("load_skill", {"name": "calculator"})
            .then_tool_call("calculate", {"expression": "6 * 7"})
            .then_text("6 * 7 = 42"))
-    _, session, loop = build_harness(model="mock", session_id="s1",
+    _, session, loop = build_harness(session_id="s1",
                                      store_dir=str(tmp_path), llm=llm)
     loop.turn("6 * 7 是多少")
     before = session.derive_messages()
 
     # 重启：新 harness（新 Session / 新 Context / 新消费者）只从磁盘上的日志重放
     llm2 = MockLLM().then_text("继续")
-    assert resume_session("s1", "继续", model="mock", store_dir=str(tmp_path),
+    assert resume_session("s1", "继续", store_dir=str(tmp_path),
                           llm=llm2) == "继续"
 
     # 恢复后的那次采样，模型收到的历史 == 中断前的投影逐字 + 本轮新输入
@@ -334,7 +334,7 @@ def test_open_harness_notifies_session_replayed_subscribers_with_the_loaded_even
     任何订阅者（现存或将来的恢复策略）都拿到同一份事件日志自行折叠。
     """
     llm = MockLLM().then_text("收到")
-    _, _, loop = build_harness(model="mock", session_id="s1",
+    _, _, loop = build_harness(session_id="s1",
                                store_dir=str(tmp_path), llm=llm)
     loop.turn("北京天气如何")
     events = PersistenceManager(Store(str(tmp_path))).load_events("s1")
@@ -350,8 +350,8 @@ def test_open_harness_notifies_session_replayed_subscribers_with_the_loaded_even
     monkeypatch.setattr(assembly, "build_harness", build_with_spy)
 
     open_harness(PersistenceManager(Store(str(tmp_path))), "s1",
-                 model="mock", store_dir=str(tmp_path), client=None,
-                 base_system_prompt="", llm=MockLLM().then_text("继续"))
+                 store_dir=str(tmp_path), base_system_prompt="",
+                 llm=MockLLM().then_text("继续"))
 
     assert spy.received == [events]        # 恰好派发一次，恰为装配层载入的那份日志
 
@@ -372,3 +372,24 @@ def test_import_works_on_a_fresh_clone_without_config_json(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "ok"
+
+
+def test_chat_loop_on_a_fresh_clone_surfaces_config_error_only_when_the_provider_is_built(tmp_path):
+    """全新 clone 上 `import app` 成功，`chat_loop()` 才失败：config.json 缺失的
+    FileNotFoundError 只在 provider 真正构造时浮出（导入期依旧不读配置）。"""
+    root = Path(__file__).resolve().parents[1]
+    for package in ("app", "capabilities", "miniharness", "providers", "tests"):
+        shutil.copytree(root / package, tmp_path / package,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    assert not (tmp_path / "config.json").exists()
+
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "from app.cli import chat_loop; chat_loop(session_id='s1')"],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True, text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "FileNotFoundError" in proc.stderr
+    assert "配置文件缺失" in proc.stderr

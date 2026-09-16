@@ -1,6 +1,7 @@
 """`python -m app` —— 真实入口：装配 harness 并进入交互式对话（需要根目录 config.json）。
+
+后端知识与 provider 构造惰性归 `app.config`；这里只给 base_system_prompt。
 """
-from app import config
 from app.cli import chat_loop
 
 
@@ -12,4 +13,4 @@ if __name__ == "__main__":
         "遇到不确定的事实时，请先加载对应技能再操作，不要猜测。"
     )
 
-    chat_loop(config._get_client(), base_prompt, "deepseek-v4-flash")
+    chat_loop(base_prompt)

@@ -125,7 +125,7 @@ def test_unloading_the_sandbox_stops_the_next_command(tmp_path):
 
 def test_the_assembled_harness_runs_commands_inside_the_sandbox(tmp_path):
     """装配落位：`build_harness` 装的就是这个沙箱——审批放行后命令确实在沙箱环境里跑。"""
-    ctx, _, _ = build_harness(model="mock", session_id="s1", store_dir=str(tmp_path),
+    ctx, _, _ = build_harness(session_id="s1", store_dir=str(tmp_path),
                               llm=MockLLM())
     ctx.get("skills").load("shell")
     ctx.on("tools/approve", lambda payload, next_: {"kind": "allow"})

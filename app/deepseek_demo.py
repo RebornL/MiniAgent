@@ -9,6 +9,7 @@ import json
 
 from openai import OpenAI
 
+from app import config
 from capabilities.final_output.provider import FinalOutputPlugin
 from miniharness.core import Context
 from miniharness.loop import Loop
@@ -22,10 +23,11 @@ from providers.deepseek import DeepSeekProvider
 def _demo() -> None:
     """装配 harness + 真实 DeepSeek：一个 calculate 工具 + final_output 终结。
 
-    真实联调 demo：`python -m app.deepseek_demo`（需要 config.json 里的凭据）
+    真实联调 demo：`python -m app.deepseek_demo`（需要 config.json 里的凭据）。
+    config 读取经 `app.config`（仓库根锚定，从任意 CWD 启动都成立）；
+    Context 手工装配是**有意为之**——demo 的存在就是为了展示构造。
     """
-    with open("config.json", "r", encoding="utf-8") as f:
-        config = json.load(f)
+    credentials = config._load_config()
 
     ctx = Context()
     ctx.provide("session", Session())
@@ -34,8 +36,8 @@ def _demo() -> None:
     ctx.load(ToolRuntime())
     ctx.load(FinalOutputPlugin())
     ctx.load(DeepSeekProvider(
-        OpenAI(base_url=config["base_url"], api_key=config["api_key"]),
-        "deepseek-v4-flash",
+        OpenAI(base_url=credentials["base_url"], api_key=credentials["api_key"]),
+        config.DEFAULT_MODEL,
         on_delta=lambda text: print(text, end="", flush=True),
     ))
 

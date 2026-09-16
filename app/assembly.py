@@ -13,8 +13,6 @@
 """
 from typing import Any, Callable
 
-from openai import OpenAI
-
 from app import config, tools
 from capabilities.compaction.provider import CompactionPlugin
 from capabilities.final_output.provider import FinalOutputPlugin
@@ -35,7 +33,6 @@ from miniharness.loop import Loop
 from miniharness.sandbox.contract import SandboxPolicy
 from miniharness.session import Session
 from miniharness.tools.runtime import ToolRuntime
-from providers.deepseek import DeepSeekProvider
 from providers.process import SubprocessSeam
 from providers.sandbox import EnvSandbox
 
@@ -109,15 +106,15 @@ def register_skills(skills: SkillRegistry, shell: ShellTool) -> None:
 # ─── 3. 装配 miniharness ─────────────────────────
 def build_harness(
     *,
-    model: str = "deepseek-v4-flash",
     session_id: str | None = None,
-    store_dir: str = "./agent_sessions",
-    client: OpenAI | None = None,
+    store_dir: str = config.DEFAULT_STORE_DIR,
     llm: LLM | None = None,
     base_system_prompt: str = "",
 ) -> tuple[Context, Session, Loop]:
     """装配 harness：Session + 工具 + LLM provider + 策略插件 + 日志消费者。
 
+    `llm` 是唯一的后端入口（测试 seam）；`None` = `config._default_llm()`（非流式默认，
+    后端知识与 provider 构造的唯一 locus 在 `app.config`）。
     策略全挂在事件 seam 上（Loop 零改动）：压缩 → `agent/pre-step`，
     重试/超时 → `tools/execute`，输出校验 → `tools/post-execute`，
     终结工具 → `agent/post-tool`，取消粘到本轮 → `tools/guard` / `agent/post-tool` / llm seam
@@ -137,7 +134,7 @@ def build_harness(
     loop = Loop()
     ctx.load(loop)                    # 依赖未就绪 → 挂起，provider/工具齐后自动激活
     ctx.load(ToolRuntime())
-    ctx.load(llm if llm is not None else _default_llm(client, model))
+    ctx.load(llm if llm is not None else config._default_llm())
     ctx.load(SubprocessSeam())        # 受管范围后端：shell 技能的执行地基
     ctx.load(EnvSandbox())            # 沙箱后端：argv 与环境先过它才允许执行（缺失即失败）
 
@@ -162,23 +159,11 @@ def build_harness(
     return ctx, session, loop
 
 
-def _print_delta(text: str) -> None:
-    """默认流式回调：边收边打印（与 legacy 的流式输出一致）。"""
-    print(text, end="", flush=True)
-
-
-def _default_llm(api: OpenAI | None, model: str) -> DeepSeekProvider:
-    """默认 provider：用传入的 client，否则惰性构造（config.json 的凭据）。"""
-    return DeepSeekProvider(api or config._get_client(), model, on_delta=_print_delta)
-
-
 def open_harness(
     pm: PersistenceManager,
     session_id: str,
     *,
-    model: str,
     store_dir: str,
-    client: OpenAI | None,
     base_system_prompt: str,
     llm: LLM | None = None,
     approver: Callable[[dict, Callable[[], Any]], dict] | None = None,
@@ -193,9 +178,8 @@ def open_harness(
     （不必去够 `Loop` 的私有面）。`approver=None` = 不装监听器 = `ask` 无人应答即默认
     拒绝——fail-closed 契约对恢复出的会话同样成立。
     """
-    ctx, session, loop = build_harness(model=model, session_id=session_id,
-                                       store_dir=store_dir, client=client, llm=llm,
-                                       base_system_prompt=base_system_prompt)
+    ctx, session, loop = build_harness(session_id=session_id, store_dir=store_dir,
+                                       llm=llm, base_system_prompt=base_system_prompt)
     # 装在重放之前：接线齐了才开跑——交给调用方的 harness 从第一个工具调用起就有人裁决
     # （审批只在回合执行期发生，重放本身不发审批请求，装在 emit 前后并无可观察差别）。
     if approver is not None:
@@ -211,10 +195,8 @@ def resume_session(
     session_id: str,
     new_input: str,
     *,
-    model: str = "deepseek-v4-flash",
     base_system_prompt: str = "",
-    store_dir: str = "./agent_sessions",
-    client: OpenAI | None = None,
+    store_dir: str = config.DEFAULT_STORE_DIR,
     llm: LLM | None = None,
     approver: Callable[[dict, Callable[[], Any]], dict] | None = None,
 ) -> str:
@@ -226,7 +208,6 @@ def resume_session(
     pm = PersistenceManager(Store(store_dir))
     if not pm.load_events(session_id):
         return f"❌ 会话 {session_id} 不存在或为空"
-    loop, _ = open_harness(pm, session_id, model=model, store_dir=store_dir,
-                           client=client, llm=llm, approver=approver,
-                           base_system_prompt=base_system_prompt)
+    loop, _ = open_harness(pm, session_id, store_dir=store_dir, llm=llm,
+                           approver=approver, base_system_prompt=base_system_prompt)
     return loop.turn(new_input)["text"]

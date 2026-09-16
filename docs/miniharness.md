@@ -250,7 +250,7 @@ llm = (MockLLM()
        .then_tool_call("load_skill", {"name": "calculator"})
        .then_tool_call("calculate", {"expression": "6*7"})
        .then_text("42"))
-ctx, session, loop = build_harness(model="mock", llm=llm, store_dir="./agent_sessions")
+ctx, session, loop = build_harness(llm=llm)   # store_dir 缺省 = config.DEFAULT_STORE_DIR
 print(loop.turn("6*7 是多少")["text"])
 print([e["type"] for e in session.events])
 ```

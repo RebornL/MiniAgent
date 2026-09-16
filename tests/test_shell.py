@@ -155,7 +155,7 @@ def test_a_denied_command_never_starts(tmp_path):
 
 def test_the_assembled_harness_ships_shell_unloaded_and_behind_approval(tmp_path):
     """装配层：`shell` 技能默认不装载；装载后 `run_command` 仍走 `ask`，无审批者默认拒绝。"""
-    ctx, _, _ = build_harness(model="mock", session_id="s1", store_dir=str(tmp_path),
+    ctx, _, _ = build_harness(session_id="s1", store_dir=str(tmp_path),
                               llm=MockLLM())
     runtime = ctx.get("tools")
     marker = tmp_path / "ran.txt"
@@ -184,7 +184,7 @@ def test_the_shell_skill_is_discoverable_while_unloaded(tmp_path):
     `shell` 默认不装载：`run_command` 不可见，它的 system_prompt 也要装载后才注入，base
     prompt 又只点名 `structured-output`。所以「可用技能」只能从 meta 工具的描述里发现。
     """
-    ctx, _, _ = build_harness(model="mock", session_id="s1", store_dir=str(tmp_path),
+    ctx, _, _ = build_harness(session_id="s1", store_dir=str(tmp_path),
                               llm=MockLLM())
     runtime = ctx.get("tools")
 
